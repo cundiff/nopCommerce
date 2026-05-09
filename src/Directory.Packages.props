@@ -1,0 +1,52 @@
+<Project>
+  <ItemGroup>
+    <PackageVersion Include="Autofac.Extensions.DependencyInjection" Version="10.0.0" />
+    <PackageVersion Include="AutoMapper" Version="14.0.0" />
+    <PackageVersion Include="Avalara.AvaTax" Version="23.5.0" />
+    <PackageVersion Include="AwesomeAssertions" Version="9.4.0" />
+    <PackageVersion Include="Azure.Identity" Version="1.16.0" />
+    <PackageVersion Include="Azure.Storage.Blobs" Version="12.26.0" />
+    <PackageVersion Include="ClosedXML" Version="0.105.0" />
+    <PackageVersion Include="DeepL.net" Version="1.15.0" />
+    <PackageVersion Include="FluentMigrator" Version="7.2.0" />
+    <PackageVersion Include="FluentMigrator.Runner" Version="7.2.0" />
+    <PackageVersion Include="FluentValidation" Version="12.1.1" />
+    <PackageVersion Include="FluentValidation.DependencyInjectionExtensions" Version="12.1.1" />
+    <PackageVersion Include="Google.Apis.Auth" Version="1.70.0" />
+    <PackageVersion Include="Google.Cloud.Translation.V2" Version="3.4.0" />
+    <PackageVersion Include="GoogleAuthenticator" Version="3.2.0" />
+    <PackageVersion Include="HarfBuzzSharp.NativeAssets.Linux" Version="8.3.1.1" />
+    <PackageVersion Include="Humanizer" Version="3.0.1" />
+    <PackageVersion Include="LigerShark.WebOptimizer.Core" Version="3.0.477" />
+    <PackageVersion Include="MailKit" Version="4.13.0" />
+    <PackageVersion Include="Markdig" Version="0.42.0" />
+    <PackageVersion Include="MaxMind.GeoIP2" Version="5.3.0" />
+    <PackageVersion Include="Microsoft.AspNetCore.Authentication.Facebook" Version="10.0.1" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.NewtonsoftJson" Version="9.0.9" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation" Version="9.0.9" />
+    <PackageVersion Include="Microsoft.Data.SqlClient" Version="6.1.1" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.5" />
+    <PackageVersion Include="Microsoft.Extensions.Caching.SqlServer" Version="9.0.9" />
+    <PackageVersion Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="9.0.9" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
+    <PackageVersion Include="Moq" Version="4.20.72" />
+    <PackageVersion Include="MySqlConnector" Version="2.5.0" />
+    <PackageVersion Include="Nito.AsyncEx.Coordination" Version="5.1.2" />
+    <PackageVersion Include="Npgsql" Version="10.0.2" />
+    <PackageVersion Include="NUnit" Version="4.5.1" />
+    <PackageVersion Include="NUnit3TestAdapter" Version="6.2.0" />
+    <PackageVersion Include="PdfRpt.Core" Version="1.5.15" />
+    <PackageVersion Include="SkiaSharp" Version="3.119.1" />
+    <PackageVersion Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.1" />
+    <PackageVersion Include="Svg.Skia" Version="3.0.6" />
+    <PackageVersion Include="System.Configuration.ConfigurationManager" Version="10.0.1" />
+    <PackageVersion Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
+    <PackageVersion Include="System.Linq.Dynamic.Core" Version="1.6.7" />
+    <PackageVersion Include="System.ServiceModel.Http" Version="8.1.2" />
+    <PackageVersion Include="WebMarkupMin.AspNetCoreLatest" Version="2.20.0" />
+    <PackageVersion Include="WebMarkupMin.NUglify" Version="2.20.0" />
+    <PackageVersion Include="brevo_csharp" Version="1.0.0" />
+    <PackageVersion Include="elFinder.NetCore" Version="1.6.0" />
+    <PackageVersion Include="linq2db" Version="6.2.1" />
+  </ItemGroup>
+</Project>
