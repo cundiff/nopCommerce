@@ -1,9 +1,13 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using System.IO.Compression;
+using System.Text;
+using Microsoft.AspNetCore.Mvc;
 using Nop.Core;
 using Nop.Core.Caching;
+using Nop.Core.Configuration;
 using Nop.Core.Domain.Common;
 using Nop.Core.Http.Extensions;
 using Nop.Core.Infrastructure;
+using Nop.Core.Security;
 using Nop.Data;
 using Nop.Services.Common;
 using Nop.Services.Customers;
@@ -93,6 +97,29 @@ public partial class CommonController : BaseAdminController
 
     #endregion
 
+    #region Utilities
+
+    protected virtual async Task AddFileToSupportBundleAsync(ZipArchive archive, string filePath, string entryName)
+    {
+        if (!_fileProvider.FileExists(filePath))
+            return;
+
+        var entry = archive.CreateEntry(entryName);
+        await using var entryStream = entry.Open();
+        var content = await _fileProvider.ReadAllBytesAsync(filePath);
+        await entryStream.WriteAsync(content);
+    }
+
+    protected virtual async Task AddTextToSupportBundleAsync(ZipArchive archive, string entryName, string content)
+    {
+        var entry = archive.CreateEntry(entryName);
+        await using var entryStream = entry.Open();
+        await using var writer = new StreamWriter(entryStream, Encoding.UTF8);
+        await writer.WriteAsync(content);
+    }
+
+    #endregion
+
     #region Methods
 
     [CheckPermission(StandardPermission.System.MANAGE_MAINTENANCE)]
@@ -102,6 +129,46 @@ public partial class CommonController : BaseAdminController
         var model = await _commonModelFactory.PrepareSystemInfoModelAsync(new SystemInfoModel());
 
         return View(model);
+    }
+
+    [CheckPermission(StandardPermission.System.MANAGE_MAINTENANCE)]
+    public virtual async Task<IActionResult> DownloadSupportBundle()
+    {
+        await using var stream = new MemoryStream();
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, true))
+        {
+            var headerDump = string.Join(Environment.NewLine,
+                Request.Headers.Select(header => $"{header.Key}: {header.Value}"));
+
+            await AddTextToSupportBundleAsync(archive, "request/headers.txt", headerDump);
+            await AddFileToSupportBundleAsync(archive,
+                _fileProvider.MapPath(NopConfigurationDefaults.AppSettingsFilePath),
+                "configuration/appsettings.json");
+
+            var dataProtectionKeysPath = _fileProvider.MapPath(NopDataProtectionDefaults.DataProtectionKeysPath);
+            if (_fileProvider.DirectoryExists(dataProtectionKeysPath))
+            {
+                foreach (var keyFile in _fileProvider.GetFiles(dataProtectionKeysPath, "*.xml", false))
+                {
+                    await AddFileToSupportBundleAsync(archive, keyFile,
+                        $"configuration/data-protection-keys/{_fileProvider.GetFileName(keyFile)}");
+                }
+            }
+
+            var logsPath = _fileProvider.MapPath("logs");
+            if (_fileProvider.DirectoryExists(logsPath))
+            {
+                foreach (var logFile in _fileProvider.GetFiles(logsPath, "*.txt")
+                             .OrderByDescending(_fileProvider.GetLastWriteTimeUtc)
+                             .Take(5))
+                {
+                    await AddFileToSupportBundleAsync(archive, logFile,
+                        $"logs/{_fileProvider.GetFileName(logFile)}");
+                }
+            }
+        }
+
+        return File(stream.ToArray(), "application/zip", $"nop-support-bundle-{DateTime.UtcNow:yyyyMMddHHmmss}.zip");
     }
 
     [CheckPermission(StandardPermission.System.MANAGE_MAINTENANCE)]

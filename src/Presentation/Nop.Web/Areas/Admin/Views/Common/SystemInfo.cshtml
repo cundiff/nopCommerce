@@ -12,6 +12,10 @@
         @T("Admin.System.SystemInfo")
     </h1>
     <div class="float-right">
+        <a asp-action="DownloadSupportBundle" class="btn btn-info">
+            <i class="fas fa-download"></i>
+            Download support bundle
+        </a>
         &nbsp;
         @await Component.InvokeAsync(typeof(AdminWidgetViewComponent), new { widgetZone = AdminWidgetZones.SystemInfoButtons, additionalData = Model })
     </div>
