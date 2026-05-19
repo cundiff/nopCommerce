@@ -20,8 +20,8 @@ public partial class WishlistShareBuilder : NopEntityBuilder<WishlistShare>
     public override void MapEntity(CreateTableExpressionBuilder table)
     {
         table
-            .WithColumn(nameof(WishlistShare.CustomerId)).AsInt32().NotNullable().ForeignKey<Customer>(onDelete: Rule.None)
-            .WithColumn(nameof(WishlistShare.CustomWishlistId)).AsInt32().Nullable().ForeignKey<CustomWishlist>(onDelete: Rule.None);
+            .WithColumn(nameof(WishlistShare.CustomerId)).AsInt32().NotNullable().ForeignKey<Customer>(onDelete: Rule.Cascade)
+            .WithColumn(nameof(WishlistShare.CustomWishlistId)).AsInt32().Nullable().ForeignKey<CustomWishlist>(onDelete: Rule.Cascade);
     }
 
     #endregion

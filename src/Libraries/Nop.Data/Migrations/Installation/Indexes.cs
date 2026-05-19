@@ -47,6 +47,10 @@ public class Indexes : ForwardOnlyMigration
             .OnColumn(nameof(ShoppingCartItem.CustomerId)).Ascending()
             .WithOptions().NonClustered();
 
+        Create.Index("IX_WishlistShare_ShareGuid").OnTable(nameof(WishlistShare))
+            .OnColumn(nameof(WishlistShare.ShareGuid)).Ascending()
+            .WithOptions().Unique();
+
         Create.Index("IX_RelatedProduct_ProductId1").OnTable(nameof(RelatedProduct))
             .OnColumn(nameof(RelatedProduct.ProductId1)).Ascending()
             .WithOptions().NonClustered();
