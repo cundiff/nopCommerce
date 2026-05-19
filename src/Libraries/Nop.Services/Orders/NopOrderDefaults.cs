@@ -7,6 +7,15 @@ namespace Nop.Services.Orders;
 /// </summary>
 public static partial class NopOrderDefaults
 {
+    #region Wishlist sharing
+
+    /// <summary>
+    /// Gets allowed wishlist share expiration periods in days
+    /// </summary>
+    public static IReadOnlyList<int> WishlistShareExpirationDays => [7, 30, 90];
+
+    #endregion
+
     #region Caching defaults
 
     #region Checkout attributes

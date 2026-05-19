@@ -42,4 +42,27 @@ public partial interface ICustomWishlistService
     /// <returns>A <see cref="CustomWishlist"/> object representing the custom wishlist with the specified identifier. Returns
     /// null if no wishlist is found with the given identifier.</returns>
     Task<CustomWishlist> GetCustomWishlistByIdAsync(int itemId);
+
+    /// <summary>
+    /// Generates a public wishlist share token for the specified customer.
+    /// </summary>
+    /// <param name="customerId">The unique identifier of the customer who owns the wishlist.</param>
+    /// <param name="customWishlistId">The optional custom wishlist identifier. If provided, it must belong to the specified customer.</param>
+    /// <param name="expirationDays">The number of days until the share expires. Must be one of the supported wishlist share expiration values.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains the created
+    /// <see cref="WishlistShare"/>.
+    /// </returns>
+    Task<WishlistShare> GenerateWishlistShareAsync(int customerId, int? customWishlistId, int expirationDays);
+
+    /// <summary>
+    /// Retrieves a wishlist share by its public share token.
+    /// </summary>
+    /// <param name="shareGuid">The public share token.</param>
+    /// <param name="onlyActive">Whether to return only non-expired shares.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains the matching
+    /// <see cref="WishlistShare"/>, or <see langword="null"/> if no matching active share exists.
+    /// </returns>
+    Task<WishlistShare> GetWishlistShareByGuidAsync(Guid shareGuid, bool onlyActive = true);
 }

@@ -12,16 +12,19 @@ public partial class CustomWishlistService : ICustomWishlistService
 
     protected readonly IRepository<CustomWishlist> _customWishlistRepository;
     protected readonly ShoppingCartSettings _shoppingCartSettings;
+    protected readonly IRepository<WishlistShare> _wishlistShareRepository;
 
     #endregion
 
     #region Ctor
 
     public CustomWishlistService(IRepository<CustomWishlist> customWishlistRepository, 
-        ShoppingCartSettings shoppingCartSettings)
+        ShoppingCartSettings shoppingCartSettings,
+        IRepository<WishlistShare> wishlistShareRepository)
     {
         _customWishlistRepository = customWishlistRepository;
         _shoppingCartSettings = shoppingCartSettings;
+        _wishlistShareRepository = wishlistShareRepository;
     }
 
     #endregion
@@ -89,6 +92,70 @@ public partial class CustomWishlistService : ICustomWishlistService
     public virtual async Task<CustomWishlist> GetCustomWishlistByIdAsync(int itemId)
     {
         return await _customWishlistRepository.GetByIdAsync(itemId);
+    }
+
+    /// <summary>
+    /// Generates a public wishlist share token for the specified customer.
+    /// </summary>
+    /// <param name="customerId">The unique identifier of the customer who owns the wishlist.</param>
+    /// <param name="customWishlistId">The optional custom wishlist identifier. If provided, it must belong to the specified customer.</param>
+    /// <param name="expirationDays">The number of days until the share expires. Must be one of the supported wishlist share expiration values.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains the created
+    /// <see cref="WishlistShare"/>.
+    /// </returns>
+    public virtual async Task<WishlistShare> GenerateWishlistShareAsync(int customerId, int? customWishlistId, int expirationDays)
+    {
+        if (customerId <= 0)
+            throw new ArgumentException("Customer identifier should be positive.", nameof(customerId));
+
+        if (!NopOrderDefaults.WishlistShareExpirationDays.Contains(expirationDays))
+            throw new ArgumentException("Unsupported wishlist share expiration period.", nameof(expirationDays));
+
+        if (customWishlistId.HasValue)
+        {
+            var customWishlist = await GetCustomWishlistByIdAsync(customWishlistId.Value);
+            if (customWishlist == null || customWishlist.CustomerId != customerId)
+                throw new InvalidOperationException("The custom wishlist cannot be shared by the specified customer.");
+        }
+
+        var now = DateTime.UtcNow;
+        var wishlistShare = new WishlistShare
+        {
+            ShareGuid = Guid.NewGuid(),
+            CustomerId = customerId,
+            CustomWishlistId = customWishlistId,
+            CreatedOnUtc = now,
+            ExpiresOnUtc = now.AddDays(expirationDays)
+        };
+
+        await _wishlistShareRepository.InsertAsync(wishlistShare);
+
+        return wishlistShare;
+    }
+
+    /// <summary>
+    /// Retrieves a wishlist share by its public share token.
+    /// </summary>
+    /// <param name="shareGuid">The public share token.</param>
+    /// <param name="onlyActive">Whether to return only non-expired shares.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains the matching
+    /// <see cref="WishlistShare"/>, or <see langword="null"/> if no matching active share exists.
+    /// </returns>
+    public virtual async Task<WishlistShare> GetWishlistShareByGuidAsync(Guid shareGuid, bool onlyActive = true)
+    {
+        if (shareGuid == Guid.Empty)
+            return null;
+
+        var query = _wishlistShareRepository.Table.Where(share => share.ShareGuid == shareGuid);
+        if (onlyActive)
+        {
+            var now = DateTime.UtcNow;
+            query = query.Where(share => share.ExpiresOnUtc > now);
+        }
+
+        return await query.FirstOrDefaultAsync();
     }
 
     #endregion
