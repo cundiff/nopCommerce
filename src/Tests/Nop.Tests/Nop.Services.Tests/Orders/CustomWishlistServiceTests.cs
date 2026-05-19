@@ -79,7 +79,7 @@ public class CustomWishlistServiceTests : BaseNopTest
     [Test]
     public async Task CannotGenerateWishlistShareWithUnsupportedExpiration()
     {
-        var action = async () => await _customWishlistService.GenerateWishlistShareAsync(_customer.Id, null, 14);
+        Func<Task> action = async () => await _customWishlistService.GenerateWishlistShareAsync(_customer.Id, null, 14);
 
         await action.Should().ThrowAsync<ArgumentException>();
     }
@@ -90,7 +90,7 @@ public class CustomWishlistServiceTests : BaseNopTest
         var anotherCustomer = (await _customerRepository.Table.ToListAsync()).First(customer => customer.Id != _customer.Id);
         var customWishlist = await CreateCustomWishlistAsync(anotherCustomer.Id);
 
-        var action = async () => await _customWishlistService.GenerateWishlistShareAsync(_customer.Id, customWishlist.Id, 7);
+        Func<Task> action = async () => await _customWishlistService.GenerateWishlistShareAsync(_customer.Id, customWishlist.Id, 7);
 
         await action.Should().ThrowAsync<InvalidOperationException>();
     }
