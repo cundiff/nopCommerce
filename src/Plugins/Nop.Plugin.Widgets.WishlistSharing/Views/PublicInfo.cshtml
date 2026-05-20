@@ -1,0 +1,96 @@
+@model PublicInfoModel
+
+<div class="wishlist-sharing-widget" id="wishlist-sharing-widget">
+    <div class="title">
+        <strong>@T("Plugins.Widgets.WishlistSharing.Title")</strong>
+    </div>
+    <div class="description">
+        @T("Plugins.Widgets.WishlistSharing.Description")
+    </div>
+    <div class="fieldset">
+        <div class="form-fields">
+            <div class="inputs">
+                <label for="wishlist-sharing-expiration">@T("Plugins.Widgets.WishlistSharing.ExpirationDays"):</label>
+                <select id="wishlist-sharing-expiration" class="wishlist-sharing-expiration">
+                    @foreach (var days in Model.ExpirationDays)
+                    {
+                        <option value="@days">@T("Plugins.Widgets.WishlistSharing.ExpirationDays.Option", days)</option>
+                    }
+                </select>
+            </div>
+            <div class="buttons">
+                <button type="button" id="wishlist-sharing-generate" class="button-2 wishlist-sharing-generate-button">
+                    @T("Plugins.Widgets.WishlistSharing.Generate")
+                </button>
+            </div>
+        </div>
+    </div>
+    <div class="message-error" id="wishlist-sharing-error" style="display:none;"></div>
+    <div class="share-info" id="wishlist-sharing-result" style="display:none;">
+        <span class="share-label">@T("Plugins.Widgets.WishlistSharing.GeneratedLink"):</span>
+        <input type="text" id="wishlist-sharing-url" class="wishlist-sharing-url" readonly="readonly" />
+        <button type="button" id="wishlist-sharing-copy" class="button-2 wishlist-sharing-copy-button">
+            @T("Plugins.Widgets.WishlistSharing.Copy")
+        </button>
+        <a href="#" id="wishlist-sharing-link" class="share-link" target="_blank" rel="noopener noreferrer"></a>
+    </div>
+</div>
+
+<script asp-location="Footer">
+    $(function () {
+        const $widget = $('#wishlist-sharing-widget');
+        const $generateButton = $('#wishlist-sharing-generate');
+        const $copyButton = $('#wishlist-sharing-copy');
+        const $error = $('#wishlist-sharing-error');
+        const $result = $('#wishlist-sharing-result');
+        const $url = $('#wishlist-sharing-url');
+        const $link = $('#wishlist-sharing-link');
+
+        $generateButton.on('click', function () {
+            $error.hide().text('');
+            $result.hide();
+
+            const postData = {
+                wishlistId: @(Model.ListId.HasValue ? Model.ListId.Value.ToString() : "null"),
+                expirationDays: $('#wishlist-sharing-expiration', $widget).val()
+            };
+            addAntiForgeryToken(postData);
+
+            $.ajax({
+                cache: false,
+                type: 'POST',
+                url: '@Url.RouteUrl(WishlistSharingDefaults.GenerateShareRouteName)',
+                data: postData,
+                success: function (response) {
+                    if (response && response.success) {
+                        $url.val(response.url);
+                        $link.attr('href', response.url).text(response.url);
+                        $result.show();
+                    } else {
+                        $error.text(response && response.message ? response.message : '@T("Plugins.Widgets.WishlistSharing.Error")').show();
+                    }
+                },
+                error: function () {
+                    $error.text('@T("Plugins.Widgets.WishlistSharing.Error")').show();
+                }
+            });
+        });
+
+        $copyButton.on('click', function () {
+            const value = $url.val();
+            if (!value) {
+                return;
+            }
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(value).then(function () {
+                    $copyButton.text('@T("Plugins.Widgets.WishlistSharing.Copied")');
+                });
+            } else {
+                $url.trigger('select');
+                document.execCommand('copy');
+                $copyButton.text('@T("Plugins.Widgets.WishlistSharing.Copied")');
+            }
+        });
+    });
+</script>

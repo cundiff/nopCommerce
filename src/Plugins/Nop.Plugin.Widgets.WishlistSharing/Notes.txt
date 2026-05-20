@@ -1,0 +1,1 @@
+This widget renders on the wishlist page and lets customers generate public wishlist links that expire after 7, 30, or 90 days.

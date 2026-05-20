@@ -90,6 +90,7 @@ public class SchemaMigration : ForwardOnlyMigration
         this.CreateTableIfNotExists<RecurringPayment>();
         this.CreateTableIfNotExists<RecurringPaymentHistory>();
         this.CreateTableIfNotExists<CustomWishlist>();
+        this.CreateTableIfNotExists<WishlistShare>();
         this.CreateTableIfNotExists<ShoppingCartItem>();
         this.CreateTableIfNotExists<Store>();
         this.CreateTableIfNotExists<StoreMapping>();
