@@ -83,6 +83,11 @@ public partial class AdminAreaSettings : ISettings
     public bool UseStickyHeaderLayout { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether admin list page filters should be persisted per user
+    /// </summary>
+    public bool EnableStickyFilters { get; set; }
+
+    /// <summary>
     /// Gets or sets the minimum number of drop-down list items to display search input.
     /// </summary>
     public int MinimumDropdownItemsForSearch { get; set; }

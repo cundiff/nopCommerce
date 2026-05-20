@@ -1733,9 +1733,11 @@ public partial class SettingController : BaseAdminController
             //and loaded from database after each update
             adminAreaSettings.UseRichEditorInMessageTemplates = model.AdminAreaSettings.UseRichEditorInMessageTemplates;
             adminAreaSettings.UseStickyHeaderLayout = model.AdminAreaSettings.UseStickyHeaderLayout;
+            adminAreaSettings.EnableStickyFilters = model.AdminAreaSettings.EnableStickyFilters;
 
             await _settingService.SaveSettingOverridablePerStoreAsync(adminAreaSettings, x => x.UseRichEditorInMessageTemplates, model.AdminAreaSettings.UseRichEditorInMessageTemplates_OverrideForStore, storeScope, false);
             await _settingService.SaveSettingAsync(adminAreaSettings, x => x.UseStickyHeaderLayout, clearCache: false);
+            await _settingService.SaveSettingAsync(adminAreaSettings, x => x.EnableStickyFilters, clearCache: false);
 
             //now clear settings cache
             await _settingService.ClearCacheAsync();

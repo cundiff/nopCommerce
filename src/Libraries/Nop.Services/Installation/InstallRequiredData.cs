@@ -1414,6 +1414,7 @@ public partial class InstallationService
             UseIsoDateFormatInJsonResult = true,
             ShowDocumentationReferenceLinks = true,
             UseStickyHeaderLayout = false,
+            EnableStickyFilters = true,
             MinimumDropdownItemsForSearch = 50
         });
 

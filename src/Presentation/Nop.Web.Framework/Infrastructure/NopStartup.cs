@@ -7,6 +7,7 @@ using Nop.Core.Configuration;
 using Nop.Core.Events;
 using Nop.Core.Infrastructure;
 using Nop.Data;
+using Nop.Services.Admin;
 using Nop.Services.Affiliates;
 using Nop.Services.ArtificialIntelligence;
 using Nop.Services.Attributes;
@@ -160,6 +161,7 @@ public partial class NopStartup : INopStartup
         services.AddScoped<IVendorService, VendorService>();
         services.AddScoped<ISearchTermService, SearchTermService>();
         services.AddScoped<IGenericAttributeService, GenericAttributeService>();
+        services.AddScoped<IAdminFilterPreferenceService, AdminFilterPreferenceService>();
         services.AddScoped<IMaintenanceService, MaintenanceService>();
         services.AddScoped<ICustomerService, CustomerService>();
         services.AddScoped<ICustomerRegistrationService, CustomerRegistrationService>();

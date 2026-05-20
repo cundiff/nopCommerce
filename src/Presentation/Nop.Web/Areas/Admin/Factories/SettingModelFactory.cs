@@ -784,7 +784,8 @@ public partial class SettingModelFactory : ISettingModelFactory
         var model = new AdminAreaSettingsModel
         {
             UseRichEditorInMessageTemplates = adminAreaSettings.UseRichEditorInMessageTemplates,
-            UseStickyHeaderLayout = adminAreaSettings.UseStickyHeaderLayout
+            UseStickyHeaderLayout = adminAreaSettings.UseStickyHeaderLayout,
+            EnableStickyFilters = adminAreaSettings.EnableStickyFilters
         };
 
         //fill in overridden values
