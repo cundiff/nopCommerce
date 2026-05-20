@@ -19,5 +19,8 @@ public partial record AdminAreaSettingsModel : BaseNopModel, ISettingsModel
     [NopResourceDisplayName("Admin.Configuration.Settings.GeneralCommon.AdminArea.UseStickyHeaderLayout")]
     public bool UseStickyHeaderLayout { get; set; }
 
+    [NopResourceDisplayName("Admin.Configuration.Settings.GeneralCommon.AdminArea.EnableStickyFilters")]
+    public bool EnableStickyFilters { get; set; }
+
     #endregion
 }

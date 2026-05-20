@@ -15,6 +15,7 @@ namespace Nop.Web.Areas.Admin.Controllers;
 [AuthorizeAdmin]
 [ValidateVendor]
 [SaveSelectedTab]
+[RestoreAdminStickyFilters]
 [NotNullValidationMessage]
 public abstract partial class BaseAdminController : BaseController
 {

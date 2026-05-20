@@ -1,4 +1,8 @@
 ﻿@model DataTablesModel
+@inject Nop.Core.Domain.Common.AdminAreaSettings adminAreaSettings
+
+@using Nop.Services.Admin
+@using System.Text.Json
 
 @functions
 {
@@ -50,6 +54,35 @@
 
     var listOfTables = new List<DataTablesModel>();
     GetAllModels(Model, listOfTables);
+
+    var controllerName = ViewContext.RouteData.Values["controller"]?.ToString();
+    var actionName = ViewContext.RouteData.Values["action"]?.ToString();
+    var stickyFilterKey = AdminFilterPreferenceDefaults.BuildKey(controllerName, actionName);
+    var stickyFilterDefinitions = new List<object>();
+
+    if (Model.Filters != null)
+    {
+        foreach (var filter in Model.Filters)
+        {
+            if (Model.IsChildTable && !string.IsNullOrEmpty(filter.ParentName))
+                continue;
+
+            if (filter.Type == typeof(int) && filter.Value != null)
+                continue;
+
+            var elementId = string.IsNullOrEmpty(filter.ModelName) ? filter.Name : $"{filter.ModelName}_{filter.Name}";
+            var filterType = filter.Type == typeof(bool) ? "bool" : "string";
+
+            stickyFilterDefinitions.Add(new
+            {
+                name = filter.Name,
+                elementId,
+                type = filterType
+            });
+        }
+    }
+
+    var stickyFilterDefinitionsJson = JsonSerializer.Serialize(stickyFilterDefinitions);
 }
 
 <script asp-location="Footer">
@@ -62,6 +95,15 @@
         {
             <text>
             $('#@Model.SearchButtonId').click(function() {
+                @if (adminAreaSettings.EnableStickyFilters)
+                {
+                    <text>
+                    saveStickyFilters(
+                        rootAppPath + 'admin/preferences/savefilterpreference',
+                        '@stickyFilterKey',
+                        @Html.Raw(stickyFilterDefinitionsJson));
+                    </text>
+                }
                 $('#@Model.Name').DataTable().ajax.reload();
                 $('#@Model.Name .checkboxGroups').prop('checked', false).change();
                 selectedIds = [];

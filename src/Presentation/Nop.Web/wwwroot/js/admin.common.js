@@ -143,6 +143,62 @@ function saveUserPreferences(url, name, value) {
 
 };
 
+function collectStickyFilterValues(filterDefinitions) {
+    var filters = {};
+
+    if (!filterDefinitions || !filterDefinitions.length) {
+        return filters;
+    }
+
+    filterDefinitions.forEach(function (filterDefinition) {
+        var $element = $('#' + filterDefinition.elementId);
+
+        if (!$element.length) {
+            return;
+        }
+
+        if (filterDefinition.type === 'bool') {
+            filters[filterDefinition.name] = $element.is(':checked');
+            return;
+        }
+
+        var value = $element.val();
+
+        if ($element.prop('multiple')) {
+            filters[filterDefinition.name] = value || [];
+            return;
+        }
+
+        filters[filterDefinition.name] = value;
+    });
+
+    return filters;
+}
+
+function saveStickyFilters(url, key, filterDefinitions) {
+    if (!url || !key) {
+        return;
+    }
+
+    var postData = {
+        key: key,
+        filtersJson: JSON.stringify(collectStickyFilterValues(filterDefinitions))
+    };
+
+    addAntiForgeryToken(postData);
+
+    $.ajax({
+        cache: false,
+        url: url,
+        type: "POST",
+        data: postData,
+        dataType: "json",
+        error: function () {
+            alert('Failed to save filter preferences.');
+        }
+    });
+}
+
 function warningValidation(validationUrl, warningElementName, passedParameters) {
     addAntiForgeryToken(passedParameters);
     var element = $('[data-valmsg-for="' + warningElementName + '"]');

@@ -7617,6 +7617,12 @@
   <LocaleResource Name="Admin.Configuration.Settings.GeneralCommon.AdminArea.UseStickyHeaderLayout.Hint">
     <Value>The content header (containing the action buttons) will stick to the top when you reach its scroll position.</Value>
   </LocaleResource>
+  <LocaleResource Name="Admin.Configuration.Settings.GeneralCommon.AdminArea.EnableStickyFilters">
+    <Value>Remember admin list filters</Value>
+  </LocaleResource>
+  <LocaleResource Name="Admin.Configuration.Settings.GeneralCommon.AdminArea.EnableStickyFilters.Hint">
+    <Value>When enabled, each administrator's last search criteria on admin list pages are saved and restored on return.</Value>
+  </LocaleResource>
   <LocaleResource Name="Admin.Configuration.Settings.GeneralCommon.AdminAreaAllowedIpAddresses">
     <Value>Admin area allowed IP</Value>
   </LocaleResource>

@@ -35,6 +35,8 @@ public class SettingMigration : MigrationBase
         //#6590
         this.SetSettingIfNotExists<AdminAreaSettings, bool>(settings => settings.UseStickyHeaderLayout, false);
 
+        this.SetSettingIfNotExists<AdminAreaSettings, bool>(settings => settings.EnableStickyFilters, true);
+
         //#7387
         this.SetSettingIfNotExists<ProductEditorSettings, bool>(settings => settings.AgeVerification, false);
 
