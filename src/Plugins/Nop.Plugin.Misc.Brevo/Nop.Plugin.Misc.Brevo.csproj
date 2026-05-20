@@ -54,7 +54,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="brevo_csharp" Version="1.0.0" />
+    <PackageReference Include="brevo_csharp" />
   </ItemGroup>
 
   <!-- This target execute after "Build" target -->
