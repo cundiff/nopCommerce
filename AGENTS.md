@@ -38,12 +38,19 @@ nopCommerce is a full-featured open-source eCommerce platform built on ASP.NET C
    ```
    sudo pg_ctlcluster 16 main start
    ```
-   The app will prompt for database configuration on first launch via the install wizard at `http://localhost:5000/install`.
+   **Important:** The PostgreSQL `citext` extension must be enabled on the target database before running the install wizard:
+   ```
+   PGPASSWORD='nopCommerce_db_password' psql -h localhost -U postgres -d nopcommerce -c "CREATE EXTENSION IF NOT EXISTS citext;"
+   ```
 
-4. **First-run install wizard:** When starting a fresh instance (no `App_Data/dataSettings.json`), the app serves an installation page. You must complete this wizard to configure the database connection and create the initial admin account.
+4. **First-run install wizard:** When no database is configured (check `App_Data/appsettings.json` → `ConnectionStrings.ConnectionString`), the app serves an installation page. After completing the wizard, the app must be restarted to pick up the new configuration. Data settings are stored in `App_Data/appsettings.json` (not the old `dataSettings.json`).
 
 5. **Tests use SQLite in-memory** — no external database server is needed to run tests.
 
 6. **The .NET SDK version** is pinned in `global.json`. The `dotnet-sdk-10.0` apt package from `packages.microsoft.com` satisfies this requirement.
 
 7. **Docker:** A `Dockerfile` and `docker-compose.yml` are provided for containerized deployment but are not required for local development.
+
+8. **Default admin credentials** (after install with sample data): `admin@yourStore.com` / `Admin123!`
+
+9. **App URL:** By default runs on `http://localhost:5000`. Use `--urls "http://localhost:5000"` with `dotnet run` to set explicitly.
