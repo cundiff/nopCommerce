@@ -1,0 +1,11 @@
+{
+  "Group": "Misc",
+  "FriendlyName": "Headless Storefront API (Vercel Commerce)",
+  "SystemName": "Misc.HeadlessApi",
+  "Version": "5.00.0",
+  "SupportedVersions": [ "5.00" ],
+  "Author": "nopCommerce community",
+  "DisplayOrder": 1,
+  "FileName": "Nop.Plugin.Misc.HeadlessApi.dll",
+  "Description": "Exposes a free, open-source headless REST/JSON storefront API (catalog, categories, cart, content) that can be used as the backend for a Vercel Commerce / Next.js storefront."
+}
