@@ -1,0 +1,11 @@
+{
+  "Group": "Misc",
+  "FriendlyName": "Headless Storefront API",
+  "SystemName": "Misc.HeadlessStorefront",
+  "Version": "5.00.1",
+  "SupportedVersions": [ "5.00" ],
+  "Author": "nopCommerce headless integration",
+  "DisplayOrder": 1,
+  "FileName": "Nop.Plugin.Misc.HeadlessStorefront.dll",
+  "Description": "REST API for headless storefronts such as Next.js Commerce"
+}
