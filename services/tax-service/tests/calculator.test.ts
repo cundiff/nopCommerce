@@ -152,4 +152,30 @@ describe('TotalCalculator', () => {
     assert.equal(result.success, true);
     assert.equal(result.taxTotal, 0);
   });
+
+  it('extracts embedded tax when prices include tax', async () => {
+    const repository = new InMemoryTaxRateRepository([], { 2: 10 });
+    const rateCalculator = new RateCalculator(repository as never);
+    const calculator = new TotalCalculator(rateCalculator);
+
+    const result = await calculator.calculate({
+      storeId: 1,
+      cartItems: [
+        {
+          productId: 1,
+          taxCategoryId: 2,
+          unitPrice: 110,
+          quantity: 1,
+        },
+      ],
+      settings: {
+        pricesIncludeTax: true,
+        countryStateZipEnabled: false,
+      },
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.taxTotal, 10);
+    assert.equal(result.taxRates['10'], 10);
+  });
 });
