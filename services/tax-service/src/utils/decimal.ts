@@ -13,7 +13,7 @@ export function calculateTaxAmount(
   }
 
   if (priceIncludesTax) {
-    return round(price - (price / (100 + taxRate)) * taxRate);
+    return round((price / (100 + taxRate)) * taxRate);
   }
 
   return round((price * taxRate) / 100);
