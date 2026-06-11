@@ -9,9 +9,21 @@ workflow `.github/workflows/dotnet.yml`; reference that instead of inventing new
 ### Services
 - **Nop.Web** — the storefront + admin web app (`src/Presentation/Nop.Web`, .NET 10).
 - **PostgreSQL 16** — the dev database (installed natively). nopCommerce also supports SQL
-  Server and MySQL, but this environment is set up with PostgreSQL. There is a `Dockerfile` /
-  `docker-compose.yml` (SQL Server) in the repo, but Docker is **not** used here — the dev
-  setup runs .NET and PostgreSQL natively.
+  Server and MySQL, but this environment is set up with PostgreSQL.
+
+### Tooling: native, NOT Docker (important)
+- The **.NET 10 SDK** is the build/test/run toolchain (`dotnet`, `/usr/bin/dotnet`). The
+  startup script installs it via `apt` (`dotnet-sdk-10.0`, from stock Ubuntu repos) if it is
+  not already present, so `dotnet` should always be available.
+- **Docker is NOT installed.** The dev setup runs everything natively (.NET + PostgreSQL).
+  The repo ships a `Dockerfile`, `docker-compose.yml`, and the `.cursor/skills/start-local-nopcommerce`
+  skill, all of which assume Docker — **those will not work here unless Docker is installed first.**
+  Use the native "Running the app" steps below instead. (Install Docker only if you specifically
+  need the container-based workflow.)
+- If a fresh VM is missing the SDK or PostgreSQL, recreate them: install the SDK with
+  `sudo apt-get update && sudo apt-get install -y dotnet-sdk-10.0`; install PostgreSQL with
+  `sudo apt-get install -y postgresql postgresql-contrib`, start it, then re-run the installer
+  (see the PostgreSQL gotcha below) if the `nopcommerce` database is gone.
 
 ### Database (already installed & seeded by setup)
 - PostgreSQL must be running before starting the app; it does **not** auto-start on VM boot:
