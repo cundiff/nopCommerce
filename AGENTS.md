@@ -11,15 +11,20 @@ workflow `.github/workflows/dotnet.yml`; reference that instead of inventing new
 - **PostgreSQL 16** — the dev database (installed natively). nopCommerce also supports SQL
   Server and MySQL, but this environment is set up with PostgreSQL.
 
-### Tooling: native, NOT Docker (important)
+### Tooling (.NET SDK + Docker)
 - The **.NET 10 SDK** is the build/test/run toolchain (`dotnet`, `/usr/bin/dotnet`). The
   startup script installs it via `apt` (`dotnet-sdk-10.0`, from stock Ubuntu repos) if it is
   not already present, so `dotnet` should always be available.
-- **Docker is NOT installed.** The dev setup runs everything natively (.NET + PostgreSQL).
-  The repo ships a `Dockerfile`, `docker-compose.yml`, and the `.cursor/skills/start-local-nopcommerce`
-  skill, all of which assume Docker — **those will not work here unless Docker is installed first.**
-  Use the native "Running the app" steps below instead. (Install Docker only if you specifically
-  need the container-based workflow.)
+- **Docker is installed (engine v29.x) but the daemon does not auto-start** (no systemd here).
+  Start it manually before any `docker` command: `sudo dockerd >/tmp/dockerd.log 2>&1 &`
+  (it is configured with the `fuse-overlayfs` storage driver and `iptables-legacy` for
+  docker-in-docker). Docker Hub images pull fine (verified with `hello-world`).
+- **The repo's Docker workflow (`Dockerfile` / `docker-compose.yml` / the
+  `start-local-nopcommerce` skill) currently CANNOT build in this network.** Its base images
+  come from `*.data.mcr.microsoft.com` (the mcr image-layer CDN) and its runtime stage runs
+  `apk add` from `dl-cdn.alpinelinux.org` — **both are blocked by egress here**, so
+  `docker build .` fails. To use the container workflow, allowlist those domains; otherwise
+  use the native "Running the app" steps below (the supported, fully-working dev path).
 - If a fresh VM is missing the SDK or PostgreSQL, recreate them: install the SDK with
   `sudo apt-get update && sudo apt-get install -y dotnet-sdk-10.0`; install PostgreSQL with
   `sudo apt-get install -y postgresql postgresql-contrib`, start it, then re-run the installer
