@@ -1,0 +1,6 @@
+workspace: ..   # nopCommerce root (parent of tools/)
+model: claude-4.6-sonnet-medium
+cursor_bin: agent
+claude_bin: claude
+warmup_sleep_seconds: 1
+output_dir: results

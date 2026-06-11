@@ -1,0 +1,1 @@
+In the nopCommerce codebase, show me all overloads of GetFinalPriceAsync on IPriceCalculationService. For each overload give me the complete signature — exact parameter names, types, default values — and the exact return type.
