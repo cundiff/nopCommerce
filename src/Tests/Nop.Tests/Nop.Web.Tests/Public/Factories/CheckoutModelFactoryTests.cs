@@ -2,6 +2,7 @@
 using Nop.Core;
 using Nop.Core.Domain.Common;
 using Nop.Core.Domain.Customers;
+using Nop.Core.Domain.Localization;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
 using Nop.Core.Domain.Shipping;
@@ -9,6 +10,8 @@ using Nop.Services.Catalog;
 using Nop.Services.Common;
 using Nop.Services.Configuration;
 using Nop.Services.Customers;
+using Nop.Services.Directory;
+using Nop.Services.Localization;
 using Nop.Services.Orders;
 using Nop.Services.Payments;
 using Nop.Tests.Nop.Services.Tests;
@@ -37,6 +40,15 @@ public class CheckoutModelFactoryTests : ServiceTest
     private IPaymentMethod _paymentMethod;
     private CommonSettings _commonSettings;
     private IOrderService _orderService;
+    private ILanguageService _languageService;
+    private IWorkContext _workContext;
+    private ICurrencyService _currencyService;
+    private Language _defaultLanguage;
+    private bool _allowCustomerToChooseDeliveryDate;
+    private int _deliveryDateRangeDays;
+    private string _euroCustomFormatting;
+    private string _euroDisplayLocale;
+    private int _customerCurrencyId;
 
     [OneTimeSetUp]
     public async Task SetUp()
@@ -77,6 +89,17 @@ public class CheckoutModelFactoryTests : ServiceTest
 
         _paymentMethod = (await GetService<IPaymentPluginManager>().LoadActivePluginsAsync(["Payments.TestMethod"])).FirstOrDefault();
         _orderService = GetService<IOrderService>();
+        _languageService = GetService<ILanguageService>();
+        _workContext = GetService<IWorkContext>();
+        _currencyService = GetService<ICurrencyService>();
+        _defaultLanguage = await _workContext.GetWorkingLanguageAsync();
+        _allowCustomerToChooseDeliveryDate = _shippingSettings.AllowCustomerToChooseDeliveryDate;
+        _deliveryDateRangeDays = _shippingSettings.DeliveryDateRangeDays;
+
+        var euro = await _currencyService.GetCurrencyByCodeAsync("EUR");
+        _euroCustomFormatting = euro.CustomFormatting;
+        _euroDisplayLocale = euro.DisplayLocale;
+        _customerCurrencyId = _customer.CurrencyId ?? 0;
 
         _checkoutModelFactory = GetService<ICheckoutModelFactory>();
     }
@@ -99,6 +122,24 @@ public class CheckoutModelFactoryTests : ServiceTest
         await _settingService.SaveSettingAsync(_rewardPointsSettings);
         foreach (var history in await _rewardPointService.GetRewardPointsHistoryAsync(_customer.Id))
             await _rewardPointService.DeleteRewardPointsHistoryEntryAsync(history);
+
+        _shippingSettings.AllowCustomerToChooseDeliveryDate = _allowCustomerToChooseDeliveryDate;
+        _shippingSettings.DeliveryDateRangeDays = _deliveryDateRangeDays;
+        await _settingService.SaveSettingAsync(_shippingSettings);
+
+        if (_defaultLanguage != null)
+            await _workContext.SetWorkingLanguageAsync(_defaultLanguage);
+
+        var euro = await _currencyService.GetCurrencyByCodeAsync("EUR");
+        euro.CustomFormatting = _euroCustomFormatting;
+        euro.DisplayLocale = _euroDisplayLocale;
+        await _currencyService.UpdateCurrencyAsync(euro);
+
+        if (_customerCurrencyId > 0)
+        {
+            _customer.CurrencyId = _customerCurrencyId;
+            await GetService<ICustomerService>().UpdateCustomerAsync(_customer);
+        }
     }
 
     [Test]
@@ -244,6 +285,76 @@ public class CheckoutModelFactoryTests : ServiceTest
     {
         Assert.Throws<AggregateException>(() =>
             _checkoutModelFactory.PrepareOnePageCheckoutModelAsync(null).Wait());
+    }
+
+    [Test]
+    public async Task PrepareShippingMethodModelShouldFormatDesiredDeliveryDateUsingWorkingLanguageCulture()
+    {
+        var frenchLanguage = (await _languageService.GetAllLanguagesAsync())
+            .FirstOrDefault(language => language.LanguageCulture == "fr-FR");
+
+        if (frenchLanguage == null)
+        {
+            frenchLanguage = new Language
+            {
+                Name = "French",
+                LanguageCulture = "fr-FR",
+                UniqueSeoCode = "fr",
+                Published = true,
+                DisplayOrder = 99
+            };
+            await _languageService.InsertLanguageAsync(frenchLanguage);
+        }
+
+        await _workContext.SetWorkingLanguageAsync(frenchLanguage);
+
+        _shippingSettings.AllowCustomerToChooseDeliveryDate = true;
+        _shippingSettings.DeliveryDateRangeDays = 3;
+        await _settingService.SaveSettingAsync(_shippingSettings);
+
+        var model = await GetService<ICheckoutModelFactory>()
+            .PrepareShippingMethodModelAsync(_cart, await _addressService.GetAddressByIdAsync(1));
+
+        var desiredDeliveryDate = model.ShippingMethods.First().DesiredDeliveryDate;
+        desiredDeliveryDate.Enabled.Should().BeTrue();
+        desiredDeliveryDate.AvailableDates.Should().NotBeEmpty();
+
+        var firstDate = desiredDeliveryDate.AvailableDates.First();
+        firstDate.Value.Should().MatchRegex(@"^\d{4}-\d{2}-\d{2}$");
+        firstDate.Text.Should().MatchRegex("(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)");
+    }
+
+    [Test]
+    public async Task PreparePaymentMethodModelShouldFormatAmountUsingFrenchCurrencyLocale()
+    {
+        var frenchLanguage = (await _languageService.GetAllLanguagesAsync())
+            .FirstOrDefault(language => language.LanguageCulture == "fr-FR");
+
+        if (frenchLanguage == null)
+        {
+            frenchLanguage = new Language
+            {
+                Name = "French",
+                LanguageCulture = "fr-FR",
+                UniqueSeoCode = "fr",
+                Published = true,
+                DisplayOrder = 99
+            };
+            await _languageService.InsertLanguageAsync(frenchLanguage);
+        }
+
+        var euro = await _currencyService.GetCurrencyByCodeAsync("EUR");
+        euro.CustomFormatting = string.Empty;
+        euro.DisplayLocale = "fr-FR";
+        await _currencyService.UpdateCurrencyAsync(euro);
+
+        await _workContext.SetWorkingLanguageAsync(frenchLanguage);
+        await _workContext.SetWorkingCurrencyAsync(euro);
+
+        var model = await GetService<ICheckoutModelFactory>().PreparePaymentMethodModelAsync(_cart, 0);
+
+        model.RewardPointsToUseAmount.Should().Contain("€");
+        model.RewardPointsToUseAmount.Should().MatchRegex(@"\d[\d\s]*,\d{2}\s*€");
     }
 
 }
