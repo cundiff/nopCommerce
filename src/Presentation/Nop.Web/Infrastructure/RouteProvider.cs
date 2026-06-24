@@ -1,5 +1,6 @@
 ﻿using Nop.Core.Http;
 using Nop.Services.Installation;
+using Nop.Web.Framework;
 using Nop.Web.Framework.Mvc.Routing;
 
 namespace Nop.Web.Infrastructure;
@@ -23,6 +24,10 @@ public partial class RouteProvider : BaseRouteProvider, IRouteProvider
         var lang = GetLanguageRoutePattern();
 
         //areas
+        endpointRouteBuilder.MapControllerRoute(name: "AdminLogin",
+            pattern: "Admin/Login",
+            defaults: new { area = AreaNames.ADMIN, controller = "AdminLogin", action = "Login" });
+
         endpointRouteBuilder.MapControllerRoute(name: "areaRoute",
             pattern: $"{{area:exists}}/{{controller=Home}}/{{action=Index}}/{{id?}}");
 
