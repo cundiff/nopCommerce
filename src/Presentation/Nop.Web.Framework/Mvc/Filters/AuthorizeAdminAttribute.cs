@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Mvc.Filters;
 using Nop.Data;
 using Nop.Services.Security;
+using Nop.Web.Framework;
 
 namespace Nop.Web.Framework.Mvc.Filters;
 
@@ -87,7 +88,17 @@ public sealed class AuthorizeAdminAttribute : TypeFilterAttribute
             {
                 //authorize permission of access to the admin area
                 if (!await _permissionService.AuthorizeAsync(StandardPermission.Security.ACCESS_ADMIN_PANEL))
-                    context.Result = new ChallengeResult();
+                {
+                    var controllerName = context.RouteData.Values["controller"]?.ToString();
+                    if (string.Equals(controllerName, "AdminLogin", StringComparison.InvariantCultureIgnoreCase))
+                        return;
+
+                    var returnUrl = context.HttpContext.Request.Path + context.HttpContext.Request.QueryString;
+                    context.Result = new RedirectToActionResult(
+                        "Login",
+                        "AdminLogin",
+                        new { area = AreaNames.ADMIN, returnUrl = returnUrl.ToString() });
+                }
             }
         }
 

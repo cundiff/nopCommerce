@@ -1308,6 +1308,24 @@
   <LocaleResource Name="Admin.AccessDenied.Title">
     <Value>Access denied.</Value>
   </LocaleResource>
+  <LocaleResource Name="Admin.Login.Title">
+    <Value>Admin sign in</Value>
+  </LocaleResource>
+  <LocaleResource Name="Admin.Login.GoogleButton">
+    <Value>Sign in with Google</Value>
+  </LocaleResource>
+  <LocaleResource Name="Admin.Login.NotAuthorized">
+    <Value>Your account does not have admin access.</Value>
+  </LocaleResource>
+  <LocaleResource Name="Admin.Login.CustomerNotFound">
+    <Value>No account found for this Google identity.</Value>
+  </LocaleResource>
+  <LocaleResource Name="Admin.Login.GoogleDisabled">
+    <Value>Google sign-in is not enabled.</Value>
+  </LocaleResource>
+  <LocaleResource Name="Admin.Login.GoogleCallbackInvalid">
+    <Value>Google sign-in could not be completed. Please try again.</Value>
+  </LocaleResource>
   <LocaleResource Name="Admin.Address">
     <Value>Address</Value>
   </LocaleResource>

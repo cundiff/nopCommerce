@@ -11,6 +11,7 @@ using Nop.Services.Affiliates;
 using Nop.Services.ArtificialIntelligence;
 using Nop.Services.Attributes;
 using Nop.Services.Authentication;
+using Nop.Services.Authentication.AdminGoogle;
 using Nop.Services.Authentication.External;
 using Nop.Services.Authentication.MultiFactor;
 using Nop.Services.Blogs;
@@ -205,6 +206,7 @@ public partial class NopStartup : INopStartup
         services.AddScoped<IPaymentService, PaymentService>();
         services.AddScoped<IEncryptionService, EncryptionService>();
         services.AddScoped<IAuthenticationService, CookieAuthenticationService>();
+        services.AddScoped<IAdminGoogleAuthService, StubAdminGoogleAuthService>();
         services.AddScoped<IUrlRecordService, UrlRecordService>();
         services.AddScoped<IShipmentService, ShipmentService>();
         services.AddScoped<IShippingService, ShippingService>();
