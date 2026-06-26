@@ -1,0 +1,79 @@
+Verified the exact `GetPreferredDiscount` implementation. Here's how the discount engine works and how your specific scenario resolves.
+
+## The mental model: discounts apply per *stage*, never globally
+
+The single most important thing to understand is that there is **no global "apply all discounts" step**. Instead, a `Discount` has a `DiscountType`, and each type is consumed at a *different point* in the price/total pipeline:
+
+| `DiscountType` | Where it's applied | Acts on |
+|---|---|---|
+| `AssignedToSkus` (2) | `PriceCalculationService.GetFinalPriceAsync` | individual product price |
+| `AssignedToCategories` (5) | same — product price stage | product price (if product is in the category) |
+| `AssignedToManufacturers` (6) | same — product price stage | product price (if product's manufacturer) |
+| `AssignedToOrderSubTotal` (20) | `OrderTotalCalculationService` subtotal stage | sum of line items |
+| `AssignedToShipping` (10) | shipping stage | shipping cost |
+| `AssignedToOrderTotal` (1) | order-total stage | final total |
+
+These stages run **in sequence**, each reducing a different number. So discounts of *different* types don't compete — they compound by virtue of hitting the total at different points.
+
+## Within a single stage: `GetPreferredDiscount` (verified)
+
+Within one stage you may have several eligible discounts of that type. The engine resolves them with this exact logic:
+
+```csharp
+// Phase 1 — pick the single largest "simple" discount
+foreach (var discount in discounts) {
+    var currentDiscountValue = GetDiscountAmount(discount, amount);
+    if (currentDiscountValue <= discountAmount) continue;
+    discountAmount = currentDiscountValue;
+    result.Clear();
+    result.Add(discount);          // new leader replaces the old
+}
+// Phase 2 — would stacking all cumulative ones beat that single best?
+var cumulativeDiscounts = discounts.Where(x => x.IsCumulative).OrderBy(x => x.Name).ToList();
+if (cumulativeDiscounts.Count <= 1) return result;
+
+var cumulativeDiscountAmount = cumulativeDiscounts.Sum(d => GetDiscountAmount(d, amount));
+if (cumulativeDiscountAmount <= discountAmount) return result;   // single still wins
+
+discountAmount = cumulativeDiscountAmount;
+result.Clear();
+result.AddRange(cumulativeDiscounts);   // stack all cumulative ones
+return result;
+```
+
+So the rule is **"largest single wins, *unless* the sum of all `IsCumulative` discounts is larger, in which case take all the cumulative ones."** Three consequences worth noting:
+
+- It's an either/or: you get **either one non-cumulative discount OR the full set of cumulative discounts** — never a mix of a cumulative one plus the best non-cumulative one.
+- It takes 2+ cumulative discounts for stacking to even be considered (`Count <= 1` bails). A lone cumulative discount just competes as a normal "simple" candidate.
+- All values are computed on the **original `amount`** (see the comment at line 351), not progressively — so two stacked 10% cumulative discounts give 20% of the original, not 10%-then-10%.
+
+`IsCumulative` therefore controls stacking **only among discounts of the same type at the same stage**. It says nothing about combining a category discount with an order-total coupon — those are different stages and always both apply.
+
+## Validation gate before any of this
+
+Every candidate is first run through `DiscountService.ValidateDiscountAsync(discount, customer, couponCodes)` before reaching `GetPreferredDiscount`. It checks, in order: active flag → **coupon code match** (if `RequiresCouponCode`, the customer's stored codes must contain `discount.CouponCode`, case-insensitive) → gift-card restriction → date window → usage limits (`Unlimited` / `NTimesOnly` global / `NTimesPerCustomer` via `DiscountUsageHistory`) → the plugin-based requirement tree (`IDiscountRequirementRule`, with AND/OR groups). Only discounts that pass become eligible candidates.
+
+Coupon codes live on the customer as a generic attribute, read via `ParseAppliedDiscountCouponCodesAsync` at *every* stage — so a coupon isn't inherently "an order discount." A coupon-gated discount is matched at whichever stage its `DiscountType` belongs to.
+
+## Your scenario: percentage coupon + product on a category discount
+
+Assume a product listed at **$100**, a 15% **category** discount (`AssignedToCategories`, no coupon), and a 10% **coupon** that's configured as an order-total discount (`AssignedToOrderTotal`, `RequiresCouponCode`).
+
+These are **two different types → two different stages → both apply, in sequence:**
+
+1. **Product price stage** (`GetFinalPriceAsync` → `GetDiscountAmountAsync` → `GetAllowedDiscountsAsync`): the engine gathers *all* product-affecting discounts — SKU, category, and manufacturer — into **one combined list**, then calls `GetPreferredDiscount` on it. The 15% category discount competes here against any SKU/manufacturer discounts (largest-wins / cumulative rule). Say it wins: product price becomes **$85**.
+
+2. **Order subtotal/total stages** (`OrderTotalCalculationService`): the subtotal is now built from the already-discounted $85. The 10% coupon, being `AssignedToOrderTotal`, is validated (coupon code matches) and applied at the order-total stage via its own `GetPreferredDiscount` call over `AssignedToOrderTotal` discounts only.
+
+Net effect — the two discounts **compound sequentially, not additively**: `$100 → $85` (category, at product price) `→ $76.50` (10% coupon, computed on the $85-derived total). The customer is *not* getting 25% off $100; they get 15% then 10%-of-the-remainder, because each discount acts on the figure produced by the prior stage.
+
+The only way two discounts would truly *combine within one stage* (e.g. two order-total coupons summing on the original amount) is if they share a `DiscountType` and both have `IsCumulative = true`.
+
+## Summary
+
+- **Type determines stage; stages run in sequence and compound.** Different-typed discounts (your category discount vs. your coupon) always both apply, at different points.
+- **`GetPreferredDiscount` decides within a stage:** largest single discount wins, unless the summed `IsCumulative` discounts beat it — then all cumulative ones stack (computed on the original amount).
+- **`IsCumulative` only governs same-stage stacking**, not cross-stage combination.
+- **`ValidateDiscountAsync` is the gate** (coupon code, dates, usage limits, requirement-rule plugins) that decides which discounts are even candidates at each stage.
+
+Want me to trace exactly where in `OrderTotalCalculationService.UpdateTotalAsync` each stage subtracts its discount (and where gift cards / reward points come in relative to the order-total discount), or look at how a custom `IDiscountRequirementRule` plugin plugs into validation?

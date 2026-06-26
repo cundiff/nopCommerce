@@ -1,0 +1,85 @@
+Confirmed the key detail (line 440 resolves the XML `ID` via `GetProductAttributeMappingByIdAsync`, and line 596 writes it from `productAttributeMapping.Id`). One important clarification up front: despite the XML element being named `<ProductAttribute ID="...">`, that `ID` is the **`ProductAttributeMapping` id**, not the global `ProductAttribute` id. That distinction is the linchpin of the whole system.
+
+## The data model
+
+There are two separate concerns in the model: **defining** what's configurable, and **enumerating** the sellable combinations.
+
+```
+ProductAttribute          "Color", "Size"  — global, reusable definitions
+      ▲ (FK ProductAttributeId)
+ProductAttributeMapping   attaches "Color" to a specific Product
+      │                   + AttributeControlType, IsRequired, TextPrompt, ConditionAttributeXml
+      ▼ (FK ProductAttributeMappingId)
+ProductAttributeValue     "Red", "Blue" — the options for THIS product's mapping
+                          + PriceAdjustment, WeightAdjustment, Cost, ColorSquaresRgb, AssociatedProductId
+
+ProductAttributeCombination   a sellable variant (Size=M + Color=Red)
+      (FK ProductId)           + AttributesXml, Sku, StockQuantity, OverriddenPrice, Gtin
+```
+
+The crucial design choices:
+
+- **`ProductAttribute` is global; `ProductAttributeMapping` is the per-product join.** "Color" is defined once, then *mapped* onto a shirt. The mapping carries the per-product behavior: how it's rendered (`AttributeControlType` — DropdownList, RadioList, Checkboxes, ColorSquares, TextBox, FileUpload…), whether it's required, the prompt text, and even conditional visibility (`ConditionAttributeXml` — e.g. "only show Sleeve Length if Type = Long").
+
+- **`ProductAttributeValue` hangs off the *mapping*, not the attribute.** So "Red" for *this* shirt has its own price adjustment, weight adjustment, cost, and color swatch. The same global "Color" attribute on a different product has its own separate values. (`PredefinedProductAttributeValue` is just a template list attached to the global `ProductAttribute` so the admin can pre-populate values when mapping it to a new product — a convenience, not part of the runtime selection path.)
+
+- **`ProductAttributeCombination` is where "configurable product" inventory actually lives.** This is the key insight for size+color: nopCommerce does **not** model a Cartesian grid of variant rows as first-class entities. Instead, each *combination you care about* is one row whose identity is an `AttributesXml` string, plus its own SKU, stock, and optional `OverriddenPrice`. So Size=M+Color=Red is a combination row with `StockQuantity = 12`, `Sku = "SHIRT-M-RED"`, etc. Combinations that don't exist as rows simply have no independent stock/SKU and fall back to the product's defaults.
+
+## How a selection is stored: `AttributesXml`
+
+A chosen set of attributes is serialized to an XML string, stored identically on `ShoppingCartItem.AttributesXml`, `OrderItem.AttributesXml`, and `ProductAttributeCombination.AttributesXml`. That uniformity is what makes lookup work — a cart selection and a stored combination are *the same kind of string* and can be compared directly.
+
+```xml
+<Attributes>
+  <ProductAttribute ID="1">          <!-- ID = ProductAttributeMappingId (e.g. the "Size" mapping) -->
+    <ProductAttributeValue>
+      <Value>2</Value>               <!-- ProductAttributeValueId for "M" -->
+    </ProductAttributeValue>
+  </ProductAttribute>
+  <ProductAttribute ID="2">          <!-- the "Color" mapping -->
+    <ProductAttributeValue><Value>5</Value></ProductAttributeValue>   <!-- multiple values = checkboxes -->
+    <ProductAttributeValue><Value>7</Value></ProductAttributeValue>
+  </ProductAttribute>
+</Attributes>
+```
+
+So the XML stores only *ids* (mapping ids + value ids), never names or prices. Everything human-meaningful is resolved from the DB on demand. (For associated-product/bundle values, each `<ProductAttributeValue>` can also carry a `<Quantity>`.)
+
+## The two services: parser vs. service
+
+This is a clean **logic-vs-persistence split**, and the dependency only goes one way:
+
+- **`IProductAttributeService` = persistence.** Plain CRUD over repositories for all five entities (`ProductAttribute`, `…Mapping`, `…Value`, `…Combination`, `Predefined…Value`) plus picture associations and SKU lookup. It knows nothing about XML. Methods like `GetProductAttributeValueByIdAsync`, `GetAllProductAttributeCombinationsAsync(productId)`, `GetProductAttributeMappingsByProductIdAsync`.
+
+- **`IProductAttributeParser` = logic over the XML.** It parses/builds/compares `AttributesXml`, converts an HTTP form into XML (`ParseProductAttributesAsync`, validating required fields and conditions), generates the full combination set (`GenerateAllCombinationsAsync`), and matches a selection to a stored combination (`FindProductAttributeCombinationAsync`). It holds no repositories of its own for these entities — **it depends on `IProductAttributeService` to turn the ids it reads out of the XML into real entities.**
+
+The collaboration, verified in the code:
+
+`ParseProductAttributeValuesAsync` reads value ids out of the XML, then hydrates each one:
+```csharp
+var attributes = await ParseProductAttributeMappingsAsync(attributesXml);   // parser: XML → mapping ids
+...
+foreach (var (valueIdStr, qtyStr) in ParseValuesWithQuantity(attributesXml, attribute.Id)) {
+    if (!int.TryParse(valueIdStr, out var attributeValueId)) continue;
+    var value = await _productAttributeService.GetProductAttributeValueByIdAsync(attributeValueId); // service: id → entity
+    ...
+}
+```
+And `ParseProductAttributeMappingsAsync` does the same for the `ID` attribute — line 440 calls `_productAttributeService.GetProductAttributeMappingByIdAsync(id)`, confirming the XML `ID` is a mapping id.
+
+`FindProductAttributeCombinationAsync` shows the round trip for variant resolution:
+```csharp
+var combinations = await _productAttributeService.GetAllProductAttributeCombinationsAsync(product.Id); // service: load all combos
+return await combinations.FirstOrDefaultAwaitAsync(async x =>
+    await AreProductAttributesEqualAsync(x.AttributesXml, attributesXml, ignoreNonCombinableAttributes)); // parser: compare XML
+```
+
+## Putting it together for a size+color shirt
+
+1. Admin creates global `ProductAttribute`s "Size" and "Color".
+2. Admin maps both onto the shirt → two `ProductAttributeMapping` rows (control type DropdownList / ColorSquares).
+3. Each mapping gets `ProductAttributeValue` rows (S/M/L; Red/Blue) with their own price/weight deltas.
+4. Admin generates combinations (`GenerateAllCombinationsAsync` produces the Cartesian product as `AttributesXml` strings) → `ProductAttributeCombination` rows, each given its own SKU and stock.
+5. At runtime, the customer's form selection becomes an `AttributesXml` (parser), that string matches a combination row (parser comparing against service-loaded combos), and stock/price/SKU for *that specific variant* come from the matched combination — falling back to the product and the per-value adjustments when no combination row exists.
+
+Want me to trace the runtime add-to-cart path (form → `ParseProductAttributesAsync` → combination match → stock check), or how price adjustments from values combine with a combination's `OverriddenPrice`?

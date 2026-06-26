@@ -1,0 +1,77 @@
+There are **3 overloads** of `GetFinalPriceAsync` on `IPriceCalculationService` (`src/Libraries/Nop.Services/Catalog/IPriceCalculationService.cs`). All three share the same return type:
+
+```csharp
+Task<(decimal priceWithoutDiscounts, decimal finalPrice, decimal appliedDiscountAmount, List<Discount> appliedDiscounts)>
+```
+
+### Overload 1 — basic (lines 27–32)
+```csharp
+Task<(decimal priceWithoutDiscounts, decimal finalPrice, decimal appliedDiscountAmount, List<Discount> appliedDiscounts)> GetFinalPriceAsync(
+    Product product,
+    Customer customer,
+    Store store,
+    decimal additionalCharge = 0,
+    bool includeDiscounts = true,
+    int quantity = 1);
+```
+
+| Parameter | Type | Default |
+|---|---|---|
+| `product` | `Product` | — |
+| `customer` | `Customer` | — |
+| `store` | `Store` | — |
+| `additionalCharge` | `decimal` | `0` |
+| `includeDiscounts` | `bool` | `true` |
+| `quantity` | `int` | `1` |
+
+### Overload 2 — with rental dates (lines 49–56)
+```csharp
+Task<(decimal priceWithoutDiscounts, decimal finalPrice, decimal appliedDiscountAmount, List<Discount> appliedDiscounts)> GetFinalPriceAsync(
+    Product product,
+    Customer customer,
+    Store store,
+    decimal additionalCharge,
+    bool includeDiscounts,
+    int quantity,
+    DateTime? rentalStartDate,
+    DateTime? rentalEndDate);
+```
+
+| Parameter | Type | Default |
+|---|---|---|
+| `product` | `Product` | — |
+| `customer` | `Customer` | — |
+| `store` | `Store` | — |
+| `additionalCharge` | `decimal` | none |
+| `includeDiscounts` | `bool` | none |
+| `quantity` | `int` | none |
+| `rentalStartDate` | `DateTime?` | none |
+| `rentalEndDate` | `DateTime?` | none |
+
+### Overload 3 — with overridden price + rental dates (lines 74–82)
+```csharp
+Task<(decimal priceWithoutDiscounts, decimal finalPrice, decimal appliedDiscountAmount, List<Discount> appliedDiscounts)> GetFinalPriceAsync(
+    Product product,
+    Customer customer,
+    Store store,
+    decimal? overriddenProductPrice,
+    decimal additionalCharge,
+    bool includeDiscounts,
+    int quantity,
+    DateTime? rentalStartDate,
+    DateTime? rentalEndDate);
+```
+
+| Parameter | Type | Default |
+|---|---|---|
+| `product` | `Product` | — |
+| `customer` | `Customer` | — |
+| `store` | `Store` | — |
+| `overriddenProductPrice` | `decimal?` | none |
+| `additionalCharge` | `decimal` | none |
+| `includeDiscounts` | `bool` | none |
+| `quantity` | `int` | none |
+| `rentalStartDate` | `DateTime?` | none |
+| `rentalEndDate` | `DateTime?` | none |
+
+**Note:** Only Overload 1 declares default values. Overloads 2 and 3 have no defaults on any parameter.

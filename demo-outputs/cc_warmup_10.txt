@@ -1,0 +1,72 @@
+Confirmed the full surface. Here's the distinction.
+
+## The one-line difference
+
+- **`IStoreContext`** answers **"*where* am I?"** — which storefront is being served. It's a property of the **request/installation** (resolved from the HTTP host).
+- **`IWorkContext`** answers **"*who* is this and how do they want things shown?"** — the current user and their display preferences. It's a property of the **visitor**.
+
+Store = the shop. Work = the shopper. They're orthogonal: the same customer can browse two stores, and two different customers can browse the same store.
+
+## What each one exposes
+
+**`IStoreContext`** (verified earlier) — tiny, just two methods:
+```csharp
+Task<Store> GetCurrentStoreAsync();              // host-resolved storefront
+Task<int>   GetActiveStoreScopeConfigurationAsync(); // admin: which store's settings I'm editing
+```
+
+**`IWorkContext`** (verified above) — the visitor's whole "ambient identity":
+```csharp
+Task<Customer> GetCurrentCustomerAsync();  Task SetCurrentCustomerAsync(...);
+Customer       OriginalCustomerIfImpersonated { get; }   // admin impersonation
+Task<Vendor>   GetCurrentVendorAsync();                  // logged-in vendor manager
+Task<Language> GetWorkingLanguageAsync();   Task SetWorkingLanguageAsync(...);
+Task<Currency> GetWorkingCurrencyAsync();   Task SetWorkingCurrencyAsync(...);
+Task<TaxDisplayType> GetTaxDisplayTypeAsync(); Task SetTaxDisplayTypeAsync(...);
+```
+
+Two structural tells of the difference:
+- **`IWorkContext` has setters; `IStoreContext` is read-only.** A visitor can change their currency/language/customer; you can't "set" which store you're in — that's fixed by the host. (The admin store *scope* is the one mutable-ish exception, and it's stored as a per-customer attribute — itself a `WorkContext`-style concept.)
+- **`IWorkContext` depends on `IStoreContext`, not vice versa.** Resolving the current customer's working currency/language requires knowing the store (for its defaults and allowed sets). Store resolution needs nothing from the visitor — just the host header. So the dependency arrow points work → store.
+
+## When to use which — concrete examples
+
+**Reach for `IStoreContext` when the behavior varies by *storefront*:**
+
+- Scoping a query or settings load to the current shop:
+  ```csharp
+  var store = await _storeContext.GetCurrentStoreAsync();
+  var taxSettings = await _settingService.LoadSettingAsync<TaxSettings>(store.Id);
+  query = await _storeMappingService.ApplyStoreMapping(query, store.Id);  // catalog filtering
+  ```
+- Stamping `StoreId` on a created entity — exactly what order placement does: `order.StoreId = processPaymentRequest.StoreId` (which the controller set from `GetCurrentStoreAsync`). Same for `ShoppingCartItem`, newsletter subscriptions, etc.
+- An admin settings controller deciding which scope to read/write: `await _storeContext.GetActiveStoreScopeConfigurationAsync()` drives the "store scope" dropdown.
+
+**Reach for `IWorkContext` when the behavior varies by *visitor*:**
+
+- Getting the logged-in customer to do anything customer-specific — load their cart, check permissions, record activity:
+  ```csharp
+  var customer = await _workContext.GetCurrentCustomerAsync();
+  var cart = await _shoppingCartService.GetShoppingCartAsync(customer, storeId: store.Id, ...);
+  ```
+  (Note this line needs *both*: the customer from work context, the store id from store context.)
+- Displaying prices in the visitor's chosen currency or formatting tax inclusive/exclusive:
+  ```csharp
+  var currency = await _workContext.GetWorkingCurrencyAsync();
+  var includingTax = await _workContext.GetTaxDisplayTypeAsync() == TaxDisplayType.IncludingTax;
+  ```
+  This `GetTaxDisplayTypeAsync` call is precisely what `TaxService.GetShippingPriceAsync(price, customer)` uses to decide presentation — a per-visitor choice.
+- Localizing UI text via `GetWorkingLanguageAsync`, or vendor-restricting an admin view via `GetCurrentVendorAsync`, or detecting impersonation with `OriginalCustomerIfImpersonated`.
+
+## The combined case (the common one)
+
+Most service methods that vary by *both* take the store id as a parameter and pull the customer from work context — that's why you constantly see the pair together:
+
+```csharp
+var customer = await _workContext.GetCurrentCustomerAsync();   // WHO
+var store    = await _storeContext.GetCurrentStoreAsync();     // WHERE
+var discounts = await _discountService.ValidateDiscountAsync(discount, customer, codes); // who
+var settings  = await _settingService.LoadSettingAsync<CatalogSettings>(store.Id);       // where
+```
+
+A useful rule of thumb: **if a different shopper on the same site would see something different, it's `IWorkContext`; if the same shopper hitting a different domain would see something different, it's `IStoreContext`.** Currency display → work context. Which products exist in the catalog → store context. The current customer's *cart* → both (the cart belongs to a customer *within* a store).

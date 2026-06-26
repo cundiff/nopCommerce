@@ -1,0 +1,71 @@
+Here's an overview of the nopCommerce solution structure. It's a classic layered ASP.NET Core architecture organized under `src/`, with a clean separation between core domain, data access, business services, and presentation.
+
+## Solution layout (`src/NopCommerce.sln`)
+
+The solution is grouped into five folders: **Libraries**, **Presentation**, **Plugins**, **Tests**, and **Build**.
+
+### Core libraries (`src/Libraries/`)
+
+**`Nop.Core`** — The foundation layer with no dependencies on other Nop projects.
+- `Domain/` — all the POCO domain entities (Product, Customer, Order, etc.), grouped by area
+- `Configuration/` — settings infrastructure
+- `Caching/` — cache abstractions (memory / distributed / Redis)
+- `Events/` — the event publishing/consumer system
+- `Infrastructure/` — DI engine, type finder, app lifecycle, startup interfaces
+- `Http/`, `Security/`, `Rss/`, `ComponentModel/` — cross-cutting helpers
+
+**`Nop.Data`** — Data access layer, built on **LinqToDB** (not EF Core).
+- `Mapping/` — entity-to-table mappings
+- `Migrations/` — FluentMigrator schema migrations and seed data
+- `DataProviders/` — SQL Server, MySQL, PostgreSQL providers
+- Owns the generic repository (`IRepository<T>`) and DB connection/config
+
+**`Nop.Services`** — The business logic layer; the largest library.
+- One sub-namespace per domain area (Catalog, Orders, Customers, Shipping, Payments, Tax, Discounts, Messages, Localization, Plugins, etc.)
+- Implements the service interfaces consumed by the presentation layer
+- Owns plugin management, messaging/email, import-export, scheduled tasks
+
+### Presentation (`src/Presentation/`)
+
+**`Nop.Web.Framework`** — Shared MVC/web infrastructure used by both the store and admin.
+- Theming, model binding, validation, security filters, widget infrastructure, base controllers/models, menu/UI helpers
+
+**`Nop.Web`** — The actual runnable application (the entry point you launch).
+- `Controllers/`, `Views/`, `Models/`, `Factories/` (model factories that assemble view models)
+- `Components/` — view components; `Validators/` — FluentValidation validators
+- `Areas/Admin/` — the **entire admin panel** lives here as an MVC Area
+- `Themes/`, `wwwroot/`, `gulp/` — front-end assets and theming
+- `Plugins/` — the runtime drop folder where built plugins are deployed
+- `App_Data/` — settings, install data, generated config
+
+### Plugins (`src/Plugins/`)
+
+~35 official plugins, each its own project following `Nop.Plugin.{Group}.{Name}`. Groups include:
+- **Payments** (PayPalCommerce, Manual, CheckMoneyOrder)
+- **Shipping** (UPS, FixedByWeightByTotal)
+- **Tax** (Avalara, FixedOrByCountryStateZip)
+- **Widgets** (GoogleAnalytics, FacebookPixel, Swiper)
+- **ExternalAuth** (Google, Facebook), **MultiFactorAuth** (GoogleAuthenticator)
+- **Misc** (Forums, News, Polls, RFQ, WebApi.Frontend, Brevo, Omnisend, Zettle, etc.)
+- **Search** (Lucene), **Pickup** (PickupInStore), **DiscountRules**, **ExchangeRate**
+
+Plugins build into `Nop.Web/Plugins` and are discovered/loaded at runtime via the plugin manager in `Nop.Services`.
+
+### Tests (`src/Tests/`)
+
+**`Nop.Tests`** — the test project (NUnit + FluentAssertions), covering core, data, and services.
+
+### Build (`src/Build/`)
+
+Shared MSBuild props/targets and build configuration imported across projects.
+
+## Dependency direction
+
+```
+Nop.Web ──► Nop.Web.Framework ──► Nop.Services ──► Nop.Data ──► Nop.Core
+Plugins ───────────────────────────────┘ (reference Services/Core/Framework)
+```
+
+`Nop.Core` sits at the bottom (entities + abstractions), and each layer up adds behavior — data access, then business services, then web framework, then the runnable `Nop.Web` host which also embeds the admin area.
+
+Want me to go deeper on any one layer — for example how plugins are loaded, how the data/migration layer works, or how the admin area is wired up?

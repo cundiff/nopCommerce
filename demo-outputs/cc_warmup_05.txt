@@ -1,0 +1,96 @@
+Verified the core mechanism directly. Here's how customer authentication works end to end.
+
+## The three players and their roles
+
+- **`IAuthenticationService`** (`CookieAuthenticationService`) — the thin adapter over ASP.NET Core's cookie middleware. It knows how to write claims into an auth cookie and read them back. It does *not* validate passwords.
+- **`ICustomerService`** — pure data access for customer entities: look up by username/email/GUID, create guests, update. No auth logic.
+- **`ICustomerRegistrationService`** — the login *business logic*: validates credentials (`ValidateCustomerAsync`) and orchestrates sign-in (`SignInCustomerAsync`).
+- **`IWorkContext`** (`WebWorkContext`) — resolves "who is the current customer" on every request, sitting on top of `IAuthenticationService`.
+
+A key design decision ties it all together: **the auth cookie stores only the username or email as a claim — not the customer id.** The full `Customer` entity is reloaded from the database on each request. This means a disabled/deleted account or a changed password takes effect immediately, without waiting for the cookie to expire.
+
+## The cookie middleware setup
+
+`AuthenticationStartup` (`Nop.Web.Framework/Infrastructure/`, `Order = 500`) calls `AddNopAuthentication` + `UseNopAuthentication`. Configuration registers two cookie schemes:
+- **`"Authentication"`** (`NopAuthenticationDefaults.AuthenticationScheme`) — the main one. Cookie `{prefix}nop.authentication`, `HttpOnly`, `SecurePolicy = SameAsRequest`, `LoginPath = /login`, `AccessDeniedPath = /page-not-found`, `ReturnUrlParameter = returnUrl`.
+- **`"ExternalAuthentication"`** — used as the default *sign-in* scheme for OAuth flows (Google/Facebook plugins) before the customer is mapped to a Nop account.
+
+On each request the standard ASP.NET Core `AuthenticationMiddleware` runs, calls `AuthenticateAsync` on the default scheme, decrypts the cookie, and populates `HttpContext.User` with the `ClaimsPrincipal`.
+
+## What happens when a returning customer logs in
+
+**1. `CustomerController.Login` (POST)** — CAPTCHA check, then extracts username-or-email (depending on `CustomerSettings.UsernamesEnabled`) and password, and calls:
+
+**2. `ICustomerRegistrationService.ValidateCustomerAsync(usernameOrEmail, password)`** — the gatekeeper. In order it checks:
+- customer exists → else `CustomerNotExist`
+- not `Deleted`, is `Active` → else `Deleted` / `NotActive`
+- is in the Registered role (`IsRegisteredAsync`) → else `NotRegistered`
+- not locked out (`CannotLoginUntilDateUtc > UtcNow`) → else `LockedOut`
+- **password match** via `GetCurrentPasswordAsync` + `PasswordsMatch`, which branches on `CustomerPassword.PasswordFormat`:
+  - `Clear` → string compare
+  - `Encrypted` → `IEncryptionService.EncryptText(entered)` compare
+  - `Hashed` → `CreatePasswordHash(entered, PasswordSalt)` compare (the normal case)
+  - On failure, increments `FailedLoginAttempts`; once it hits `FailedPasswordAllowedAttempts` it sets `CannotLoginUntilDateUtc` (the lockout)
+- if MFA configured → `MultiFactorAuthenticationRequired`
+- **on success**: resets failed attempts/lockout, clears `RequireReLogin`, sets `LastLoginDateUtc`, persists via `UpdateCustomerAsync`, returns `Successful`.
+
+**3. On `Successful`, the controller calls `SignInCustomerAsync(customer, returnUrl, rememberMe)`**, which does the guest→registered transition:
+- Grabs the current (guest) customer from `IWorkContext`.
+- **Migrates the shopping cart** from the guest to the now-authenticated customer (`MigrateShoppingCartAsync`), preserving affiliate id.
+- Updates the work context to the new customer.
+- Calls **`IAuthenticationService.SignInAsync(customer, isPersistent)`** ← this is where the cookie gets set.
+- Publishes **`CustomerLoggedinEvent`** (carrying the original guest, so consumers can react to the migration) and logs `PublicStore.SuccessfulLogin` activity.
+- Redirects to `returnUrl` (if valid) or the homepage.
+
+**4. `CookieAuthenticationService.SignInAsync` (verified above)** builds the principal and writes the cookie:
+
+```csharp
+if (!string.IsNullOrEmpty(customer.Username))
+    claims.Add(new Claim(ClaimTypes.Name, customer.Username, ..., NopAuthenticationDefaults.ClaimsIssuer));
+if (!string.IsNullOrEmpty(customer.Email))
+    claims.Add(new Claim(ClaimTypes.Email, customer.Email, ..., NopAuthenticationDefaults.ClaimsIssuer));
+
+var userIdentity = new ClaimsIdentity(claims, NopAuthenticationDefaults.AuthenticationScheme);
+var props = new AuthenticationProperties { IsPersistent = isPersistent, IssuedUtc = DateTime.UtcNow };
+await _httpContextAccessor.HttpContext.SignInAsync(NopAuthenticationDefaults.AuthenticationScheme, userPrincipal, props);
+_cachedCustomer = customer;   // request-scoped cache
+```
+
+Note `IsPersistent` = the "Remember Me" flag (session vs. persistent cookie) and `IssuedUtc` is stamped — that timestamp matters in step 6.
+
+## How the current customer is resolved on every subsequent request
+
+`WebWorkContext.GetCurrentCustomerAsync` → `SetCurrentCustomerAsync` runs a priority chain (cached per request):
+1. Background-task user, then search-engine bot detection.
+2. **Registered customer via `IAuthenticationService.GetAuthenticatedCustomerAsync()`** — the auth cookie path.
+3. Admin impersonation override.
+4. **Guest customer** via the separate `NopCookieDefaults.CustomerCookie` GUID (`GetCustomerByGuidAsync`).
+5. If still nothing, **create a new guest** (`InsertGuestCustomerAsync`) and set the guest GUID cookie.
+
+So there are *two* cookies: the encrypted **auth cookie** (registered users, holds username/email claims) and a plain **customer-GUID cookie** (tracks guests/anonymous carts). A logged-in user has both; the auth path wins.
+
+`GetAuthenticatedCustomerAsync` (verified above) is the crux:
+- Returns the request-cached customer if present.
+- `AuthenticateAsync` on the `"Authentication"` scheme; bail if it didn't succeed.
+- Reads the `ClaimTypes.Name` **or** `ClaimTypes.Email` claim (gated by `UsernamesEnabled`, and filtered to the `nopCommerce` issuer) and **reloads the customer from the DB** by that value.
+- Re-validates `Active && !RequireReLogin && !Deleted && IsRegistered` — returns `null` (effectively logged out) if any fail.
+- **Password-change check**: if `RequiredReLoginAfterPasswordChange` and the current `CustomerPassword.CreatedOnUtc` is newer than the cookie's `IssuedUtc` (both trimmed to whole seconds), returns `null` — forcing re-login after a password change anywhere.
+
+## The shape of it
+
+```
+Login POST
+  └─ ValidateCustomerAsync        (credentials, lockout, password hash) ── ICustomerService (load + update)
+  └─ SignInCustomerAsync          (migrate cart, set work context, raise event)
+       └─ IAuthenticationService.SignInAsync ── HttpContext.SignInAsync → encrypted auth cookie (username/email claim)
+
+Every later request
+  AuthenticationMiddleware → AuthenticateAsync → HttpContext.User
+  WorkContext.GetCurrentCustomerAsync
+       └─ IAuthenticationService.GetAuthenticatedCustomerAsync
+            └─ read claim → ICustomerService.GetCustomerBy{Username,Email}Async → re-validate → current Customer
+```
+
+The takeaway: the cookie is just a signed pointer (username/email + issued-time); `ICustomerService` rehydrates the real entity each request, `IAuthenticationService` brokers the cookie, and `ICustomerRegistrationService` owns the credential logic — with the work context choosing between authenticated, impersonated, and guest identities.
+
+Want me to go deeper on guest→registered cart migration, the external-auth (Google/Facebook) flow that uses the second scheme, or how authorization/permissions (`CheckPermission`, customer roles) build on top of this?

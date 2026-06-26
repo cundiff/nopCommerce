@@ -1,0 +1,97 @@
+Good question — and there's an important correction up front: **this codebase has no `IDynamicCacheManager`**. The two-sided abstraction is `IStaticCacheManager` vs **`IShortTermCacheManager`**. ("Dynamic" may be how you remembered it, or terminology from a different version/framework — but the cache that's *not* static here is the short-term, per-request one.) I'll explain the real pairing.
+
+## The two cache managers
+
+Both live in `src/Libraries/Nop.Core/Caching/` and both implement the marker interface `ICacheKeyService` (so both know how to build keys), but they differ in lifetime:
+
+| | `IStaticCacheManager` | `IShortTermCacheManager` |
+|---|---|---|
+| Comment in source | "caching **between** HTTP requests (long term)" | "caching **during** an HTTP request (short term)" |
+| Lifetime | Minutes (`CacheKey.CacheTime`), app-wide | One request, then discarded |
+| DI lifetime | Singleton (or distributed backend) | Scoped (per request) |
+| Implementations | `MemoryCacheManager`, `SynchronizedMemoryCacheManager`, and `DistributedCacheManager` → `RedisCacheManager` / `MsSqlServerCacheManager` / `MemoryDistributedCacheManager` | `PerRequestCacheManager` (backed by a `ConcurrentTrie<object>`) |
+| API shape | Fully async (`GetAsync`/`SetAsync`/`RemoveAsync`/`RemoveByPrefixAsync`) | `GetAsync` is async; `Remove`/`RemoveByPrefix` are synchronous |
+
+**When each is used:** The generic repository (`Nop.Data/EntityRepository.cs`) picks between them. `GetByIdAsync(..., useShortTermCache: true)` routes through `IShortTermCacheManager`; otherwise it uses `IStaticCacheManager`. Short-term cache is for "I'm going to ask for this same thing several times *within one request*" — it avoids even the Redis round-trip. Static is the real cross-request cache that survives between requests and is shared across the app (and across nodes, if Redis/SQL-backed).
+
+Note that "static" does **not** mean in-process. With Redis configured, `IStaticCacheManager` resolves to `RedisCacheManager`, so it's a distributed cache. The pluggable backend is the whole point of the abstraction.
+
+## How cache keys are constructed
+
+A `CacheKey` (`CacheKey.cs`) is just a format-string template plus a `CacheTime`:
+
+```csharp
+public partial class CacheKey {
+    public string Key { get; protected set; }   // e.g. "Nop.product.byid.{0}"
+    public int CacheTime { get; set; }           // minutes; defaults to CacheConfig.DefaultCacheTime
+}
+```
+
+Entity templates come from a generic defaults class, `NopEntityCacheDefaults<TEntity>`:
+
+```csharp
+EntityTypeName => typeof(TEntity).Name.ToLowerInvariant();   // "product"
+ByIdCacheKey  => "Nop.product.byid.{0}"
+ByIdsCacheKey => "Nop.product.byids.{0}"
+AllCacheKey   => "Nop.product.all."
+ByIdsPrefix   => "Nop.product.byids."
+AllPrefix     => "Nop.product.all."
+```
+
+You materialize a concrete key by feeding parameters through `CacheKeyService.PrepareKey(cacheKey, params)` (or `PrepareKeyForDefaultCache`, which also stamps the default `CacheTime`). That calls `CacheKey.Create()`, which runs each parameter through `CreateCacheKeyParameters` and then `string.Format`s them into the template:
+
+```csharp
+object CreateCacheKeyParameters(object parameter) => parameter switch {
+    null                       => "null",
+    IEnumerable<int> ids       => CreateIdsHash(ids),                 // SHA1 of sorted ids
+    IEnumerable<BaseEntity> es => CreateIdsHash(es.Select(e => e.Id)),
+    BaseEntity entity          => entity.Id,                          // entity → its Id
+    decimal param              => param.ToString(InvariantCulture),
+    _                          => parameter
+};
+```
+
+Two things worth noting:
+- **Entities collapse to their `Id`** — passing a `Product` produces `Nop.product.byid.5`.
+- **Collections of ids are SHA1-hashed after sorting** (`CreateIdsHash`): `[3,1,2]` → `"1, 2, 3"` → a stable hash. This keeps keys bounded in length and order-independent, so the same set of ids always hits the same cache entry.
+
+## How invalidation works on entity change
+
+It's an **event-driven, prefix-based** scheme. The flow:
+
+**1. Repository CRUD publishes an event.** `EntityRepository.InsertAsync/UpdateAsync/DeleteAsync` call `_eventPublisher.EntityInsertedAsync/UpdatedAsync/DeletedAsync(entity)` (unless `publishEvent: false`), raising `EntityInsertedEvent<TEntity>` / `EntityUpdatedEvent<TEntity>` / `EntityDeletedEvent<TEntity>`.
+
+**2. A cache consumer handles it.** `CacheEventConsumer<TEntity>` (`Nop.Services/Caching/CacheEventConsumer.cs`) implements `IConsumer<>` for all three events. Every handler funnels into:
+
+```csharp
+protected virtual async Task ClearCacheAsync(TEntity entity, EntityEventType type) {
+    await RemoveByPrefixAsync(NopEntityCacheDefaults<TEntity>.ByIdsPrefix);   // all "byids" hashes
+    await RemoveByPrefixAsync(NopEntityCacheDefaults<TEntity>.AllPrefix);     // all "all" listings
+    if (type != EntityEventType.Insert)
+        await RemoveAsync(NopEntityCacheDefaults<TEntity>.ByIdCacheKey, entity); // this exact id
+    await ClearCacheAsync(entity);   // entity-specific overrides
+}
+```
+
+The logic is deliberately conservative: it can't know *which* "list of products" or "byids hash" included this entity, so it nukes the whole `byids.` and `all.` prefixes. The single-id key is removed precisely (and skipped on insert, since nothing could be cached under a brand-new id yet).
+
+**3. `RemoveByPrefixAsync` clears both caches:**
+
+```csharp
+protected virtual async Task RemoveByPrefixAsync(string prefix, params object[] p) {
+    _shortTermCacheManager.RemoveByPrefix(prefix, p);          // request cache
+    await _staticCacheManager.RemoveByPrefixAsync(prefix, p);  // long-term/distributed
+}
+```
+
+How the prefix sweep is actually done depends on the backend:
+- **MemoryCacheManager** keeps a key registry (`ICacheKeyManager`) and removes every tracked key under the prefix.
+- **RedisCacheManager** enumerates keys matching `instanceName + prefix*` per endpoint and `KeyDeleteAsync`es them.
+- **MsSqlServerCacheManager** issues `DELETE ... WHERE Id LIKE @prefix + '%'`.
+- **PerRequestCacheManager** prunes the prefix subtree from its `ConcurrentTrie`.
+
+**4. Entity-specific consumers add their own knock-on invalidations.** Each entity that has derived caches subclasses the consumer and overrides `ClearCacheAsync(entity)`. For example `ProductCacheEventConsumer : CacheEventConsumer<Product>` also clears product-price prefixes, the homepage-products key, manufacturer-by-product prefixes, etc., before calling `base.ClearCacheAsync`. So when a product changes, not only the product's own keys but every dependent cached projection gets dropped.
+
+The net effect: services never manually invalidate caches on writes. They just go through the repository; the event → `CacheEventConsumer` chain handles invalidation uniformly, and the per-entity consumer is the one place to declare "these other caches depend on this entity."
+
+Want me to trace a concrete end-to-end example — say, what exactly gets evicted when you update a single `Product` — or look at how the cache backend is selected at startup (`DistributedCacheConfig`)?

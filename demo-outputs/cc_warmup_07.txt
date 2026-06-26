@@ -1,0 +1,90 @@
+Verified. The implementation matches exactly. Here's how shipping tax works.
+
+## Which service owns it
+
+`ITaxService` / `TaxService` (`Nop.Services/Tax/TaxService.cs`) owns shipping tax via `GetShippingPriceAsync`. The key architectural point: **shipping tax is not special-cased** — it routes through the *same* core engine (`GetProductPriceAsync`) that products use, just with a `null` product and the shipping tax class. `OrderTotalCalculationService` is the consumer that calls it and folds the result into order totals.
+
+## The shipping tax method (verified)
+
+There are two overloads. The convenience one resolves the display type from the work context:
+
+```csharp
+public virtual async Task<(decimal price, decimal taxRate)> GetShippingPriceAsync(decimal price, Customer customer)
+{
+    var includingTax = await _workContext.GetTaxDisplayTypeAsync() == TaxDisplayType.IncludingTax;
+    return await GetShippingPriceAsync(price, includingTax, customer);
+}
+
+public virtual async Task<(decimal price, decimal taxRate)> GetShippingPriceAsync(decimal price, bool includingTax, Customer customer)
+{
+    var taxRate = decimal.Zero;
+    if (!_taxSettings.ShippingIsTaxable)
+        return (price, taxRate);                     // ← shipping not taxable: price unchanged, 0% rate
+
+    var taxClassId = _taxSettings.ShippingTaxClassId;            // tax category for shipping
+    var priceIncludesTax = _taxSettings.ShippingPriceIncludesTax; // is the input rate already tax-inclusive?
+    return await GetProductPriceAsync(null, taxClassId, price, includingTax, customer, priceIncludesTax);
+}
+```
+
+So three `TaxSettings` flags govern it:
+- **`ShippingIsTaxable`** — the master switch. If `false`, it short-circuits: returns the price as-is with rate `0`. No exemption or display logic runs.
+- **`ShippingTaxClassId`** — the tax category passed to the active tax provider to look up the regional rate.
+- **`ShippingPriceIncludesTax`** — whether the *configured shipping rate* already bakes in tax.
+
+## Does it differ by tax display type? Yes — but only in *presentation*
+
+The `includingTax` flag (from `TaxDisplayType.IncludingTax` vs `ExcludingTax`, resolved per-customer via `_workContext.GetTaxDisplayTypeAsync()`) feeds into `GetProductPriceAsync`, which combines it with `priceIncludesTax` to decide whether to add or strip tax from the base figure:
+
+| `ShippingPriceIncludesTax` (stored) | `includingTax` (display) | Action |
+|---|---|---|
+| false | false | leave as-is (net) |
+| false | true | **add** tax |
+| true | true | leave as-is (gross) |
+| true | false | **strip** tax |
+
+Critically, the display type changes *how the number is presented*, not how much tax is owed. That's why `OrderTotalCalculationService.GetShoppingCartShippingTotalsAsync` simply calls `GetShippingPriceAsync` **twice** — once with `includingTax: true`, once with `false` — to populate both `OrderShippingInclTax` and `OrderShippingExclTax` on the order, persisting both rather than picking one.
+
+## Does it differ by customer tax exemption? Yes — rate forced to 0
+
+Inside `GetProductPriceAsync`, the protected `GetTaxRateAsync` determines taxability via `IsTaxExemptAsync`:
+
+```csharp
+public virtual async Task<bool> IsTaxExemptAsync(Product product, Customer customer)
+{
+    if (customer != null)
+    {
+        if (customer.IsTaxExempt) return true;                                  // customer flag
+        if ((await _customerService.GetCustomerRolesAsync(customer))
+              .Any(cr => cr.TaxExempt)) return true;                            // any role exempt
+    }
+    if (product == null) return false;                                          // ← shipping path
+    return product.IsTaxExempt;
+}
+```
+
+Two things follow for shipping specifically:
+- Because `GetShippingPriceAsync` passes `product = null`, **product-level exemption never applies to shipping** — only `customer.IsTaxExempt` or a tax-exempt **customer role** can exempt shipping.
+- EU VAT exemption (`IsVatExemptAsync` on the customer/address) also zeroes it when `EuVatEnabled`.
+
+When the request is not taxable, `GetProductPriceAsync` does two things: it skips adding tax to the price, and it explicitly forces the returned rate to zero:
+
+```csharp
+if (!isTaxable)
+    taxRate = decimal.Zero;   // exempt → 0% shipping tax rate
+```
+
+So an exempt customer gets shipping returned at its base amount with a `0` rate, which means `OrderShippingInclTax == OrderShippingExclTax` and shipping contributes nothing to the tax total.
+
+## How it lands in the order
+
+`OrderTotalCalculationService.GetShoppingCartShippingTotalsAsync` computes the raw shipping rate, calls `GetShippingPriceAsync` for both incl/excl variants, optionally rounds, and returns `(shippingInclTax, shippingExclTax, taxRate, discounts)`. Those become `OrderShippingInclTax`/`OrderShippingExclTax` (the values we saw written in `SaveOrderDetailsAsync` during order placement), and the shipping `taxRate` is merged into the order's tax-rates dictionary that `GetTaxTotalAsync` aggregates alongside product and payment-fee tax.
+
+## Summary
+
+- **Owner:** `TaxService.GetShippingPriceAsync`, delegating to the shared `GetProductPriceAsync` engine — consumed by `OrderTotalCalculationService`.
+- **`ShippingIsTaxable = false`** → instant `(price, 0)`, nothing else matters.
+- **Display type** changes only inclusive-vs-exclusive presentation (combined with `ShippingPriceIncludesTax`); the system stores *both* shipping figures.
+- **Exemption** (customer flag or tax-exempt role, or EU VAT) forces the shipping tax rate to `0` and leaves the price untouched; product-level exemption is irrelevant to shipping since the product arg is `null`.
+
+Want me to trace how the active tax provider plugin (e.g. the fixed-rate or by-country/state/zip plugin) actually returns the rate for `ShippingTaxClassId`, or how `GetTaxTotalAsync` aggregates the per-rate breakdown?

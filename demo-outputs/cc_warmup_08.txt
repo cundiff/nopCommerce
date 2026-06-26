@@ -1,0 +1,102 @@
+Verified — the implementation matches exactly. Here's how multi-store works.
+
+## The big picture
+
+One installation, one database, multiple storefronts. Multi-store rests on three independent mechanisms:
+
+1. **Store resolution** — figure out *which* store this request belongs to (by HTTP host). Owned by `IStoreContext`.
+2. **Per-store settings** — a single `Setting` table where `StoreId = 0` means "shared/all stores" and `StoreId > 0` is a store-specific override, with automatic fallback.
+3. **Per-entity store mapping** — catalog entities (products, categories…) are shared by default and *optionally* restricted to specific stores via a `StoreMapping` join table.
+
+`IStoreContext` is the entry point that the other two hang off of — it answers "what store am I in?", and settings/catalog filtering take that store id as input.
+
+## 1. Store resolution — `IStoreContext` (verified)
+
+`IStoreContext` has just two methods. The web implementation is `WebStoreContext`:
+
+```csharp
+public virtual async Task<Store> GetCurrentStoreAsync()
+{
+    if (_cachedStore != null) return _cachedStore;          // per-request cache
+
+    string host = _httpContextAccessor.HttpContext?.Request.Headers[HeaderNames.Host];
+    var allStores = await _storeService.GetAllStoresAsync();
+    var store = allStores.FirstOrDefault(s => _storeService.ContainsHostValue(s, host))
+                ?? allStores.FirstOrDefault();              // ← no host match → first store
+
+    _cachedStore = store ?? throw new Exception("No store could be loaded");
+    return _cachedStore;
+}
+```
+
+So resolution is purely **HTTP Host-header matching**:
+- Each `Store` has a `Hosts` field — a comma-separated list of host values (e.g. `store1.com,www.store1.com`).
+- `StoreService.ContainsHostValue` splits that list (`ParseHostValues`) and does a case-insensitive equality match against the incoming `Host`.
+- **If no host matches** (or there's only one store), it falls back to the first store. So a single-store install "just works" without configuring hosts. `GetAllStoresAsync` is cached, so this is cheap.
+- The result is cached in `_cachedStore` for the lifetime of the request — `GetCurrentStoreAsync` gets called all over the place, so it resolves once.
+
+There are **two distinct notions of "current store"**, which is a common point of confusion:
+- `GetCurrentStoreAsync()` — the *storefront* store, resolved from the host. Used everywhere on the public site.
+- `GetActiveStoreScopeConfigurationAsync()` — the *admin* concept: when an admin edits settings, which store's scope are they editing? It returns `0` (= all stores) unless there are 2+ stores, in which case it reads the admin's chosen scope from a generic attribute on the customer (`AdminAreaStoreScopeConfigurationAttribute`). This is what the "store scope" dropdown at the top of admin config pages drives.
+
+## 2. Per-store settings with shared fallback
+
+The `Setting` entity is `(Name, Value, StoreId)`. `StoreId = 0` is the universal/shared value; `StoreId > 0` is a per-store override. Loading resolves the override-then-shared chain:
+
+```csharp
+// GetSettingAsync
+var setting = settingsByKey.FirstOrDefault(x => x.StoreId == storeId);
+if (setting == null && storeId > 0 && loadSharedValueIfNotFound)
+    setting = settingsByKey.FirstOrDefault(x => x.StoreId == 0);   // fall back to shared
+```
+
+`LoadSettingAsync<T>(storeId)` builds a strongly-typed settings object property-by-property, each property doing that store→shared fallback. So a store inherits all shared values and only diverges where an override row exists.
+
+Saving mirrors this with `SaveSettingOverridablePerStoreAsync`, which is what the admin "override for this store" checkbox calls:
+
+```csharp
+if (overrideForStore || storeId == 0)
+    await SaveSettingAsync(settings, keySelector, storeId, clearCache);   // write override (or shared)
+else if (storeId > 0)
+    await DeleteSettingAsync(settings, keySelector, storeId);             // unchecking = delete override → revert to shared
+```
+
+Unchecking "override" *deletes* the store-specific row, so the store falls back to the shared value again. This is the mechanism that answers your question directly: **once `IStoreContext` gives you the store id, the settings service applies that store's overrides layered over the shared defaults.**
+
+## 3. Per-entity store mapping (catalog sharing)
+
+Catalog entities that can be store-scoped implement `IStoreMappingSupported`, which is just a `bool LimitedToStores` flag. `Product`, `Category`, `Manufacturer`, `BlogPost`, etc. all implement it.
+
+- **`LimitedToStores = false`** → the entity is shared by *all* stores. No `StoreMapping` rows needed. This is the default, and it's exactly your "two storefronts sharing a product catalog" case — products stay unrestricted and appear everywhere.
+- **`LimitedToStores = true`** → the entity is visible only in stores that have an explicit `StoreMapping` row. `StoreMapping` is a generic join: `(EntityId, EntityName, StoreId)` — e.g. `(42, "Product", 2)`.
+
+The filtering happens at the query level via `ApplyStoreMapping`:
+
+```csharp
+public virtual async Task<IQueryable<TEntity>> ApplyStoreMapping<TEntity>(IQueryable<TEntity> query, int storeId)
+{
+    if (storeId == 0 || _catalogSettings.IgnoreStoreLimitations || !await IsEntityMappingExistsAsync<TEntity>())
+        return query;                                       // shortcuts: no filtering needed
+
+    return from entity in query
+        where !entity.LimitedToStores || _storeMappingRepository.Table.Any(sm =>
+            sm.EntityName == typeof(TEntity).Name && sm.EntityId == entity.Id && sm.StoreId == storeId)
+        select entity;
+}
+```
+
+The predicate is the heart of it: **include the entity if it's not limited to stores, OR it has a mapping row for this store.** Three notable optimizations: `storeId == 0` skips filtering entirely, an `IgnoreStoreLimitations` catalog setting disables the whole feature, and `IsEntityMappingExistsAsync` skips the join if *no* entity of that type is store-limited.
+
+For single-entity checks (e.g. "can this customer view this product page?"), `AuthorizeAsync(entity)` does the equivalent in-memory: returns `true` if `storeId == 0`, if `IgnoreStoreLimitations`, or if `!entity.LimitedToStores`; otherwise checks whether the current store is in `GetStoresIdsWithAccessAsync(entity)`.
+
+## How it ties together when a customer browses a product
+
+1. **Resolve store:** the controller calls `_storeContext.GetCurrentStoreAsync()` → host header → `store.Id`.
+2. **Apply settings:** services load their settings with that store id (e.g. tax, currency, catalog settings), getting store-specific overrides layered over shared defaults.
+3. **Filter the catalog:** list queries in `ProductService` pipe through `_storeMappingService.ApplyStoreMapping(query, storeId)` (alongside an analogous ACL filter `ApplyAcl`), and the product detail action gates access with `_storeMappingService.AuthorizeAsync(product)`.
+
+So a shared product (`LimitedToStores = false`) shows in both storefronts automatically, while a product limited to Store 1 is filtered out of Store 2's listings and returns "not available" on its detail page — all keyed off the single store id that `IStoreContext` resolved from the host.
+
+The clean separation worth remembering: **`IStoreContext` only does resolution + caching**; it holds no settings or catalog logic. `ISettingService` and `IStoreMappingService` are the consumers that take its store id and apply scoping. That's why almost every service method that varies by store takes a `storeId` parameter rather than reaching into the store context itself.
+
+Want me to look at the ACL/customer-role layer (`IAclService`, which works identically to store mapping but for roles), or how store scope flows through the admin settings controllers?

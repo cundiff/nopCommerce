@@ -1,0 +1,99 @@
+Verified the lookup and fallback exactly. Here's the complete picture of the localization system.
+
+## Two separate storage models
+
+The single most important distinction: nopCommerce localizes **two fundamentally different kinds of text** with two tables.
+
+| | `LocaleStringResource` | `LocalizedProperty` |
+|---|---|---|
+| What | Static UI strings — labels, buttons, messages | Translations of *entity field values* |
+| Shape | `(LanguageId, ResourceName, ResourceValue)` | `(EntityId, LanguageId, LocaleKeyGroup, LocaleKey, LocaleValue)` |
+| Example | `"Plugins.Payments.Manual.Fields.AdditionalFee"` → "Additional fee" | Product #5's `Name` in French → "Chemise Bleue" |
+| Keyed by | a developer-chosen resource name | which entity + which property |
+| Service | `ILocalizationService` | `ILocalizedEntityService` (+ `GetLocalizedAsync` extension) |
+
+So "the word *Save* on a button" is a `LocaleStringResource`; "the name of *this specific product*" is a `LocalizedProperty`. As a plugin author you almost always work with the **first** — that's what "add a localizable string" means. The second is only relevant if your plugin introduces a new localizable *entity*.
+
+## How entity-field localization works (`LocalizedProperty`)
+
+Entities that implement `ILocalizedEntity` (Product, Category, etc.) get their fields translated via the extension:
+```csharp
+var name = await _localizationService.GetLocalizedAsync(product, p => p.Name);
+```
+`GetLocalizedAsync` reflects the type name as `LocaleKeyGroup` ("Product") and the property name as `LocaleKey` ("Name"), then calls `ILocalizedEntityService.GetLocalizedValueAsync(langId, entity.Id, "Product", "Name")`. If a `LocalizedProperty` row exists for the working language it's used; otherwise it **falls back to the entity's own column value** (`product.Name`). This is why an untranslated product still renders its default name.
+
+## Resource lookup + caching (`LocaleStringResource`)
+
+`GetResourceAsync(resourceKey)` resolves the working language from `IWorkContext` and delegates to the language-specific overload (verified above). Notable details:
+
+- **Keys are case-insensitive** — normalized to `Trim().ToLowerInvariant()` on both write and read.
+- **Two caching strategies**, controlled by `LocalizationSettings.LoadAllLocaleRecordsOnStartup`:
+  - `true` → all resources for a language are loaded into one cached dictionary (split into public vs. admin subsets, keyed by the `Admin.` prefix) — one big cache, fast lookups.
+  - `false` → "gradual loading": each resource is cached individually under `LocaleStringResourcesByNameCacheKey` (`...byname.{languageId}-{resourceKey}`).
+  Both go through `IStaticCacheManager`, and any insert/update/delete clears the `LocaleStringResource` prefix.
+- **Not-found fallback** (the part worth memorizing):
+  ```csharp
+  if (logIfNotFound) await _logger.WarningAsync($"Resource string ({resourceKey}) is not found...");
+  if (!string.IsNullOrEmpty(defaultValue)) result = defaultValue;
+  else if (!returnEmptyIfNotFound) result = resourceKey;   // ← returns the KEY itself
+  ```
+  So a missing resource **renders its own key** in the UI by default (e.g. you'll literally see `plugins.payments.manual.fields.additionalfee`). That visible key is the tell-tale sign of a resource you forgot to install. Pass `returnEmptyIfNotFound: true` to get `""` instead, or a `defaultValue`.
+
+## How the locale is selected per request
+
+`WebWorkContext.GetWorkingLanguageAsync` resolves and caches the language for the request via a priority chain:
+
+1. **URL SEO code** — if `SeoFriendlyUrlsForLanguagesEnabled`, `NopSeoUrlCultureProvider` inspects the first path segment (`/fr/...`), matches it to a `Language.UniqueSeoCode`, and feeds the culture into ASP.NET Core's request-localization pipeline. (Also where browser `Accept-Language` is honored if `AutomaticallyDetectLanguage` is on.)
+2. **Customer preference** — `Customer.LanguageId` (a stored attribute), if valid for the store.
+3. **Store default** — `store.DefaultLanguageId`.
+4. **First language** available for the store, then first in the system.
+
+`SetWorkingLanguageAsync` persists the choice to `Customer.LanguageId` and a culture cookie, and raises `CustomerChangeWorkingLanguageEvent`. The resolved language is cached per request (`_cachedLanguage`), exactly like the store/customer contexts we discussed earlier. URL prefixing is handled by `LocalizedUrlExtensions` (`AddLanguageSeoCodeToUrl` / `RemoveLanguageSeoCodeFromUrl`).
+
+## Recommended pattern: adding localizable strings to a plugin
+
+This is the established convention, straight from `Nop.Plugin.Payments.Manual`:
+
+**1. Add resources in `InstallAsync`** via `AddOrUpdateLocaleResourceAsync` with a dictionary. Use the dotted naming convention `Plugins.{Group}.{Name}.{Key}` (and `.Hint` for tooltips):
+```csharp
+public override async Task InstallAsync()
+{
+    await _settingService.SaveSettingAsync(new ManualPaymentSettings { ... });
+
+    await _localizationService.AddOrUpdateLocaleResourceAsync(new Dictionary<string, string>
+    {
+        ["Plugins.Payments.Manual.Fields.AdditionalFee"] = "Additional fee",
+        ["Plugins.Payments.Manual.Fields.AdditionalFee.Hint"] = "Enter additional fee to charge your customers.",
+        ["Plugins.Payments.Manual.Fields.TransactMode"] = "After checkout mark payment as",
+        ["Plugins.Payments.Manual.PaymentMethodDescription"] = "Pay by credit / debit card",
+        // ...
+    });
+    await base.InstallAsync();
+}
+```
+With no `languageId`, it writes the resource to **every** installed language (English text as the value); pass a `languageId` to target one. It's upsert semantics — safe to re-run, which is why it's `AddOrUpdate`.
+
+**2. Remove them in `UninstallAsync`** with a single prefix delete:
+```csharp
+public override async Task UninstallAsync()
+{
+    await _settingService.DeleteSettingAsync<ManualPaymentSettings>();
+    await _localizationService.DeleteLocaleResourcesAsync("Plugins.Payments.Manual");  // bulk by prefix
+    await base.UninstallAsync();
+}
+```
+This is exactly why the dotted prefix convention matters — one `DeleteLocaleResourcesAsync("Plugins.Payments.Manual")` cleans up every resource the plugin added, across all languages, in one shot. Keep the prefix unique to your plugin.
+
+**3. Use the resources:**
+- **In code** (e.g. your `IPaymentMethod` description): `await _localizationService.GetResourceAsync("Plugins.Payments.Manual.PaymentMethodDescription")`.
+- **On model fields** for admin config forms: decorate with `[NopResourceDisplayName("Plugins.Payments.Manual.Fields.AdditionalFee")]` — the admin tag helpers (`<nop-label>`, `<nop-editor>`) read this attribute to render the localized label and hint automatically.
+- **In Razor views**: the localization tag helpers / `GetResourceAsync` calls resolve against the current working language.
+
+## Practical guidance
+
+- **Always install English values** as the resource value; translators add other languages later via the admin language import/export (XML) or per-language overrides.
+- **Pick a unique dotted prefix** (`Plugins.<Group>.<Name>.`) so uninstall can clean up with one prefix delete and you don't collide with core resources.
+- **If you see the raw key in the UI**, the resource wasn't installed (or the plugin wasn't reinstalled after you added a new key) — that's the `result = resourceKey` fallback firing, and there'll be a warning in the log.
+- Reserve `LocalizedProperty`/`GetLocalizedAsync` for translating *data your plugin owns as entities*; for everything UI-facing, `LocaleStringResource` is the answer.
+
+Want me to show the admin language XML import/export flow (how translators bulk-edit resources), or how `NopResourceDisplayName` + the admin tag helpers wire a settings model to localized labels end to end?

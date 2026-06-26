@@ -1,0 +1,91 @@
+Here's how the plugin system works and what you'd need to build a payment method plugin.
+
+## How nopCommerce discovers and loads plugins
+
+The whole lifecycle runs at startup, before the DI engine is built:
+
+1. **Build output drops into a known folder.** Each plugin's `.csproj` sets `OutputPath` to `Nop.Web/Plugins/{SystemName}/`. So building a plugin deploys its DLLs + `plugin.json` into a subfolder there. That folder is the runtime discovery root (`NopPluginDefaults.Path = "~/Plugins"`).
+
+2. **`plugin.json` is the descriptor.** Each plugin folder has one. It's deserialized into `PluginDescriptor` (`Nop.Services/Plugins/PluginDescriptor.cs`). Example:
+   ```json
+   {
+     "Group": "Payment methods",
+     "FriendlyName": "Credit Card",
+     "SystemName": "Payments.Manual",
+     "Version": "5.00.3",
+     "SupportedVersions": [ "5.00" ],
+     "Author": "nopCommerce team",
+     "DisplayOrder": 1,
+     "FileName": "Nop.Plugin.Payments.Manual.dll",
+     "Description": "..."
+   }
+   ```
+
+3. **Startup triggers loading.** `Program.cs` → `ConfigureApplicationServices()` (`Nop.Web.Framework/.../ServiceCollectionExtensions.cs`) calls `PartManager.InitializePlugins(pluginConfig)` in `ApplicationPartManagerExtensions.cs`. This:
+   - Builds a `PluginsInfo` and calls `LoadPluginInfo()`, which scans `~/Plugins/*/plugin.json`, checks `SupportedVersions` against `NopVersion.CURRENT_VERSION` (incompatible ones are skipped), and reads installed-plugin state from `~/App_Data/plugins.json`.
+   - For each plugin needing deployment, loads its DLLs via `PerformFileDeploy()`, registering each as an MVC `AssemblyPart` (this is what makes plugin controllers/views routable). It does collision detection so a plugin can't clobber an already-loaded core assembly.
+   - Reflects over the loaded assembly to find the **one** non-abstract class implementing `IPlugin` and stores it as `PluginDescriptor.PluginType`.
+
+4. **DI registration.** `NopEngine.ConfigureServices()` runs every `INopStartup` it finds across all assemblies — including ones inside your plugin — so plugins register their own services.
+
+5. **Runtime resolution.** Plugins are never hand-registered as services. They're resolved on demand via `PluginDescriptor.Instance<TPlugin>()`, which calls `EngineContext.Current.ResolveUnregistered(PluginType)` (constructor injection works) and sets `.PluginDescriptor` back on the instance. The typed accessor is `IPluginManager<TPlugin>` (cached by store/customer/role), with `PaymentPluginManager` as the payment-specific subclass.
+
+Install/uninstall is deferred: the admin UI writes pending names into `~/App_Data/plugins.json` and the actual `InstallAsync()` + migrations run on the next restart.
+
+## What a payment plugin must implement
+
+Your main class inherits `BasePlugin` (gives default `IPlugin` lifecycle methods) and implements `IPaymentMethod` (`Nop.Services/Payments/IPaymentMethod.cs`), which extends `IPlugin`.
+
+**Methods** (all async except the view component):
+- `ProcessPaymentAsync` — the core charge; returns a `ProcessPaymentResult` with the new `PaymentStatus`
+- `PostProcessPaymentAsync` — for redirect-based gateways (send the user off-site)
+- `CaptureAsync`, `RefundAsync`, `VoidAsync` — only meaningful if you advertise support (see properties)
+- `ProcessRecurringPaymentAsync`, `CancelRecurringPaymentAsync` — subscriptions
+- `HidePaymentMethodAsync`, `GetAdditionalHandlingFeeAsync`, `CanRePostProcessPaymentAsync`
+- `GetPaymentInfoAsync` / `ValidatePaymentFormAsync` — read & validate the checkout form
+- `GetPublicViewComponent()` — returns the `Type` of the view component that renders the checkout UI
+- `GetPaymentMethodDescriptionAsync` — customer-facing description
+
+**Properties** (capability flags + behavior):
+- `SupportCapture`, `SupportRefund`, `SupportPartiallyRefund`, `SupportVoid`
+- `RecurringPaymentType` (NotSupported / Manual / Automatic)
+- `PaymentMethodType` (Standard = on-site form, Redirection = off-site gateway, Button)
+- `SkipPaymentInfo`
+
+**From `BasePlugin`/`IPlugin`** you typically override:
+- `GetConfigurationPageUrl()` → returns your admin Configure route
+- `InstallAsync()` / `UninstallAsync()` → save default settings + localization resources
+
+## The full file layout (modeled on `Nop.Plugin.Payments.Manual`)
+
+```
+Nop.Plugin.Payments.YourGateway/
+├── YourGatewayProcessor.cs        // BasePlugin + IPaymentMethod  ← the IPlugin type
+├── YourGatewaySettings.cs         // : ISettings (ApiKey, fees, etc.)
+├── Controllers/
+│   └── PaymentYourGatewayController.cs   // : BasePaymentController, [Area(ADMIN)], Configure GET/POST
+├── Components/
+│   └── PaymentYourGatewayViewComponent.cs // : NopViewComponent, returned by GetPublicViewComponent()
+├── Models/
+│   ├── ConfigurationModel.cs      // admin settings form
+│   └── PaymentInfoModel.cs        // checkout form
+├── Views/
+│   ├── Configure.cshtml           // admin config (nop tag helpers)
+│   ├── PaymentInfo.cshtml         // checkout payment form
+│   └── _ViewImports.cshtml
+├── Validators/PaymentInfoValidator.cs   // : BaseNopValidator (FluentValidation)
+├── Infrastructure/NopStartup.cs   // : INopStartup — optional, register HttpClients/services
+├── Nop.Plugin.Payments.YourGateway.csproj   // OutputPath → Nop.Web/Plugins/...; refs Nop.Web
+├── plugin.json
+└── logo.png
+```
+
+A few practical notes:
+- **`.csproj`** must set `OutputPath` to `$(SolutionDir)\Presentation\Nop.Web\Plugins\Payments.YourGateway` and reference `Nop.Web` — that's what auto-deploys it into the discovery folder.
+- **Settings** are saved/loaded via `ISettingService` with per-store override support (`SaveSettingOverridablePerStoreAsync`); load with the active store scope from `IStoreContext`.
+- **`INopStartup` is optional** — only needed if your plugin has its own services (e.g. an `HttpClient` for the gateway API, model factories). The processor class itself is resolved automatically with constructor injection.
+- The admin "Payment methods" list and checkout discover your method purely through `PaymentPluginManager` finding the `IPaymentMethod` implementation — no manual wiring.
+
+The Manual plugin (`src/Plugins/Nop.Plugin.Payments.Manual/`) is the cleanest reference for a simple on-site form; `Payments.PayPalCommerce` is the one to study for a real redirect/API gateway with `INopStartup`-registered services.
+
+Want me to scaffold a minimal working payment plugin in this repo as a starting point?

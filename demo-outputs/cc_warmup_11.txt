@@ -1,0 +1,104 @@
+Verified — the HTTP-POST-to-self design is real (line 206: `client.PostAsync(_scheduleTaskUrl, data)`). That's the key architectural quirk worth understanding. Here's the full picture.
+
+## The architecture in one diagram
+
+```
+App startup (AppStartedConsumer)
+   └─ TaskScheduler.InitializeAsync()  → one TaskThread per enabled ScheduleTask row
+   └─ StartSchedulerAsync()            → each thread starts a PeriodicTimer(Seconds)
+
+every N seconds, per TaskThread:
+   PeriodicTimer tick → RunAsync()
+        └─ HTTP POST  {store.Url}/scheduletask/runtask   body: taskType=<Type string>
+                                  │ (goes back into the same app over HTTP)
+                                  ▼
+   ScheduleTaskController.RunTask(taskType)
+        └─ GetTaskByTypeAsync(taskType)
+        └─ IScheduleTaskRunner.ExecuteAsync(task)
+               └─ resolve Type from DI → cast to IScheduleTask → task.ExecuteAsync()
+               └─ update LastStartUtc / LastEndUtc / LastSuccessUtc; handle StopOnError
+```
+
+## The surprising part: it's a timer that pings an HTTP endpoint
+
+The scheduler does **not** run your task code directly on the timer thread. Each `TaskThread` holds a `PeriodicTimer` whose only job, on each tick, is to make an HTTP `POST` to `{store.Url}/scheduletask/runtask` with the task's `Type` string as form data (`RunAsync`, line 206). The actual work happens inside the normal MVC request pipeline via `ScheduleTaskController`.
+
+Why this matters to you:
+- Tasks execute in a **full web-request context** (HttpContext, scoped DI, work/store context all available) — not a bare background thread. That's why a task can use the same scoped services as a controller.
+- The scheduler needs a **reachable, correct `store.Url`** in the database. If the store URL is wrong/unreachable (common in dev or behind a proxy), the timer fires but the POST fails and the task silently never runs. This is the #1 gotcha.
+- The `ScheduleTaskRunner` wraps execution in a **distributed lock** (`PerformActionWithLockAsync` keyed on the task type, expiry = `min(Seconds, 300) - 1`), and `RunTask` checks `LastStartUtc` against `Seconds`. So in a web-farm/multi-instance deployment, even though every instance has its own timer firing, only one actually runs each task per period. The HTTP indirection + lock is what makes scheduling safe across multiple app instances.
+
+## The contract you implement
+
+`IScheduleTask` is a one-method interface:
+```csharp
+public partial interface IScheduleTask { Task ExecuteAsync(); }
+```
+Your class is resolved from DI by `ScheduleTaskRunner.PerformTaskAsync`, so constructor injection works exactly like a service. The runner finds your type via `Type.GetType(scheduleTask.Type)` (falling back to scanning loaded assemblies), resolves it (`EngineContext.Current.Resolve`, falling back to `ResolveUnregistered`), calls `ExecuteAsync()`, then stamps `LastStartUtc` before and `LastEndUtc`/`LastSuccessUtc` after.
+
+A `ScheduleTask` **entity row** is what makes it run — the two fields that matter most:
+- **`Seconds`** — the interval (3600 = hourly).
+- **`Type`** — the assembly-qualified class name string, e.g. `"Nop.Services.Caching.ClearCacheTask, Nop.Services"`. This is the link between the DB row and your code.
+
+Plus `Enabled`, `StopOnError` (if true, an exception disables the task), and the `Last*Utc` bookkeeping fields the runner maintains.
+
+## Concrete steps for your hourly inventory sync
+
+**1. Write the task** (in your plugin):
+```csharp
+namespace Nop.Plugin.Misc.InventorySync.Tasks;
+
+public partial class InventorySyncTask : IScheduleTask
+{
+    protected readonly IExternalInventoryClient _client;   // your gateway
+    protected readonly IProductService _productService;
+    protected readonly ILogger _logger;
+
+    public InventorySyncTask(IExternalInventoryClient client, IProductService productService, ILogger logger)
+    { _client = client; _productService = productService; _logger = logger; }
+
+    public virtual async Task ExecuteAsync()
+    {
+        var stock = await _client.FetchStockLevelsAsync();
+        foreach (var item in stock)
+        {
+            var product = await _productService.GetProductBySkuAsync(item.Sku);
+            if (product is null) continue;
+            product.StockQuantity = item.Quantity;
+            await _productService.UpdateProductAsync(product);   // fires entity events → cache invalidation
+        }
+    }
+}
+```
+Register any custom dependencies (`IExternalInventoryClient`, an `HttpClient`) in your plugin's `INopStartup.ConfigureServices`. The task itself needs no special registration — the runner resolves it by type.
+
+**2. Insert the `ScheduleTask` row in the plugin's `InstallAsync`:**
+```csharp
+await _scheduleTaskService.InsertTaskAsync(new ScheduleTask
+{
+    Name = "Inventory sync (external)",
+    Seconds = 3600,                                  // hourly
+    Type = "Nop.Plugin.Misc.InventorySync.Tasks.InventorySyncTask, Nop.Plugin.Misc.InventorySync",
+    Enabled = true,
+    LastEnabledUtc = DateTime.UtcNow,
+    StopOnError = false                              // keep retrying if the external system is down
+});
+```
+
+**3. Remove it in `UninstallAsync`** (otherwise an orphan row points at a missing type):
+```csharp
+var task = await _scheduleTaskService.GetTaskByTypeAsync(
+    "Nop.Plugin.Misc.InventorySync.Tasks.InventorySyncTask, Nop.Plugin.Misc.InventorySync");
+if (task != null) await _scheduleTaskService.DeleteTaskAsync(task);
+```
+
+After install, the task also appears under **Admin → System → Schedule tasks**, where the interval and enabled flag can be edited and it can be run on-demand — useful for testing without waiting an hour.
+
+## Practical notes / gotchas
+
+- **`Seconds` is a floor, not a precise cron.** The timer plus the `LastStartUtc + Seconds` guard means "at least an hour between runs," not "on the hour." There's no cron-expression support — only fixed intervals. For "every hour on the hour" or calendar scheduling, you'd compute timing inside `ExecuteAsync` yourself.
+- **`StopOnError = true`** flips `Enabled` off after the first unhandled exception. For an external sync that may transiently fail, prefer `false` and handle/log errors inside the task.
+- **Make it idempotent and bounded.** Because a run could overlap conceptually with the next interval if it's slow, the distributed lock guards against concurrent runs, but you should still keep the work re-runnable and avoid unbounded execution time relative to `Seconds`.
+- **The new task only schedules after the app re-initializes the scheduler** (app restart / plugin install reload), since `InitializeAsync` builds the `TaskThread` list at startup.
+
+Want me to sketch the `INopStartup` registration for a typed `HttpClient` to the external inventory API, or show how to make the sync resilient (batching + per-SKU error isolation so one bad record doesn't abort the whole run)?

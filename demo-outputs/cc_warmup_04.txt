@@ -1,0 +1,108 @@
+Confirmed the structure, and I caught one inaccuracy worth flagging: there is **no database transaction** wrapping order placement here. This codebase uses LinqToDB (not EF Core, as we established earlier), and `PlaceOrderAsync` has no `TransactionScope` or `BeginTransaction` — each repository write commits independently. I've corrected that below.
+
+Here's the end-to-end trace.
+
+## 1. Controller entry point
+
+`Nop.Web/Controllers/CheckoutController.cs` — two paths converge on the same service call:
+- Multi-step checkout: `ConfirmOrder` (POST `/checkout/confirm`)
+- One-page checkout: `OpcConfirmOrder` (AJAX POST)
+
+Both do the same setup: pull the saved `ProcessPaymentRequest` out of session (`GetProcessPaymentRequestAsync`), stamp it with `StoreId`, `CustomerId`, and the customer's selected `PaymentMethodSystemName`, then call:
+
+```csharp
+var placeOrderResult = await _orderProcessingService.PlaceOrderAsync(processPaymentRequest);
+```
+
+Note the division of labor: the controller does *pre-flight* gating (cart non-empty, checkout enabled, anonymous-checkout allowed, minimum-placement-interval), while `PlaceOrderAsync` does the *authoritative* validation. The controller's checks are UX guards; the service is the source of truth.
+
+## 2. `PlaceOrderAsync` structure (lines 1567–1692)
+
+The method has a distinctive shape worth understanding before the steps:
+
+```csharp
+public async Task<PlaceOrderResult> PlaceOrderAsync(ProcessPaymentRequest req) {
+    if (req.OrderGuid == Guid.Empty) throw new Exception("Order GUID is not generated");
+    var details = await PreparePlaceOrderDetailsAsync(req);   // (1) gather + validate
+
+    async Task<PlaceOrderResult> placeOrder(PlaceOrderContainer c) {
+        var result = new PlaceOrderResult();
+        try { /* payment + persist + post-processing */ }
+        catch (Exception exc) { await _logger.ErrorAsync(...); result.AddError(exc.Message); }
+        return result;
+    }
+
+    if (!_orderSettings.PlaceOrderWithLock)
+        return await placeOrder(details);
+
+    // else: wrap in a named Mutex keyed on customer id to block duplicate concurrent orders
+    using var mutex = new Mutex(false, details.Customer.Id.ToString());
+    mutex.WaitOne();
+    try { /* check OrderWithLock cache key, then placeOrder(details).Result */ }
+    finally { mutex.ReleaseMutex(); }
+}
+```
+
+Two key design points:
+- **All the real work is inside a `try/catch`.** Any failure (validation, payment, persistence) is caught, logged, and returned as errors on `PlaceOrderResult` — exceptions don't propagate to the controller. The controller inspects `placeOrderResult.Success`.
+- **Optional mutex (`PlaceOrderWithLock` setting).** When enabled, placement for a given customer is serialized via a named `Mutex` plus an `OrderWithLockCacheKey` (TTL = `MinimumOrderPlacementInterval`) to defend against double-submits. Note the deliberate `.Result`/`.Wait()` blocking calls — a mutex can't span `await`.
+
+## 3. Preparation + validation — `PreparePlaceOrderDetailsAsync` (line 282)
+
+Runs **first, before any payment or writes**, building a `PlaceOrderContainer` and validating as it goes. Throwing here aborts placement before anything is persisted. The sub-steps:
+
+- `PrepareAndValidateCustomerAsync` — loads the customer, enforces guest-checkout-allowed, sets currency/language.
+- `PrepareAndValidateShoppingCartAndCheckoutAttributesAsync` — loads the cart, runs **full cart validation + per-item validation**, and enforces **minimum order subtotal/total**; collects checkout-attribute XML.
+- `PrepareAndValidateBillingAddressAsync` — billing address present, email valid, country allows billing.
+- `PrepareAndValidateShippingInfoAsync` — shipping address or pickup point, country allows shipping, selected shipping option present.
+- `PrepareAndValidateTotalsAsync` — calculates subtotal (incl/excl tax), discounts (and the applied-discount list), shipping, payment fees, tax/VAT, gift cards, reward points → and crucially sets `processPaymentRequest.OrderTotal`. Totals are recomputed server-side, not trusted from the client.
+- If `IsRecurringShoppingCart`, `PrepareAndValidateRecurringShoppingAsync`.
+
+## 4. Payment — `GetProcessPaymentResultAsync` (line 1388)
+
+Inside `placeOrder`, **payment runs before the order is saved**:
+- If `IsPaymentWorkflowRequiredAsync` (order total > 0), it loads the payment plugin by system name, verifies it's active, then calls `ProcessRecurringPaymentAsync` or `ProcessPaymentAsync` (the `IPaymentMethod` implementation we discussed earlier).
+- If no payment is required, it short-circuits to a result with `NewPaymentStatus = Paid`.
+
+**Only if `processPaymentResult.Success` does persistence proceed.** A failed charge adds errors to the result and no order row is created.
+
+## 5. Order entity creation + persistence — `SaveOrderDetailsAsync` (line 717)
+
+Constructs the `Order` from the validated `details` container — all totals (`OrderSubtotalInclTax/ExclTax`, `OrderShippingInclTax`, `OrderTax`, `OrderTotal`), `OrderStatus = Pending`, `PaymentStatus = processPaymentResult.NewPaymentStatus`, shipping status, payment method, checkout attributes, `CreatedOnUtc`.
+
+Persistence order:
+1. Insert addresses (`InsertAddressAsync` for billing, pickup, shipping) → set their FKs on the order.
+2. `await _orderService.InsertOrderAsync(order)` — **the order row is written here.**
+3. Generate the human-facing `CustomOrderNumber` from the now-known `order.Id`, then `UpdateOrderAsync(order)` — a second write.
+4. Reward-points history (if any) → another order update to link the entry.
+
+## 6. Order items + inventory — `MoveShoppingCartItemsToOrderItemsAsync` (line 1276)
+
+Loops each cart item: loads the product, computes unit/subtotal prices (incl/excl tax + discounts), formats the attribute description, computes item weight, builds an `OrderItem` (new GUID, `order.Id`, qty, prices, attrs), and:
+- `InsertOrderItemAsync(orderItem)` per item,
+- `AddGiftCardsAsync` if the product is a gift card,
+- `AdjustInventoryAsync(product, -qty, ...)` to decrement stock (with a stock-history record referencing the order).
+
+Then `ClearShoppingCartAsync` empties the cart.
+
+## 7. Remaining post-placement steps (still inside `placeOrder`)
+
+In order (lines 1597–1623):
+1. `SaveDiscountUsageHistoryAsync` — `DiscountUsageHistory` per applied discount.
+2. `SaveGiftCardUsageHistoryAsync` — `GiftCardUsageHistory` per applied gift card.
+3. `CreateFirstRecurringPaymentAsync` — only for recurring carts.
+4. `SendNotificationsAndSaveNotesAsync` — adds the "Order placed" order note and queues store-owner/customer/vendor/affiliate emails.
+5. `ResetCheckoutDataAsync` + log `PublicStore.PlaceOrder` activity.
+6. `await _eventPublisher.PublishAsync(new OrderPlacedEvent(order))` — **the extension point for plugins.**
+7. `CheckOrderStatusAsync(order)` — re-evaluates status (Pending → Processing → possibly Complete) based on payment/shipping status and settings.
+8. If `order.PaymentStatus == Paid`, `ProcessOrderPaidAsync` — fires `OrderPaidEvent`, queues "order paid" emails, and applies any purchase-based customer role assignments.
+
+## 8. Back in the controller (post-processing)
+
+After `PlaceOrderAsync` returns successfully, the controller clears the session payment request, then calls `_paymentService.PostProcessPaymentAsync(new PostProcessPaymentRequest { Order = order })`. For redirection-type methods (PayPal, etc.) this is where the customer is sent to the gateway; otherwise it redirects to `checkout/completed`.
+
+## Important caveat: no transactional atomicity
+
+Because there's no wrapping transaction, all the writes above (addresses, order, items, inventory, history, notes) commit individually. The protections against partial/duplicate orders are instead: the `try/catch` that converts failures into a returned error result, payment running *before* persistence (so a declined card never creates order rows), and the optional `PlaceOrderWithLock` mutex + interval cache key against double-submits. If a write *after* `InsertOrderAsync` were to fail, you could in principle get a partially-populated order — there's no rollback. That's a real consideration if you're extending this flow.
+
+Want me to drill into any branch — e.g. the totals calculation in `PrepareAndValidateTotalsAsync`, what `CheckOrderStatusAsync` does exactly, or how `OrderPlacedEvent` consumers are wired?
