@@ -1,0 +1,67 @@
+{
+  "id": "cart_total_pipeline",
+  "rubric": "structured_terms",
+  "source_files": [
+    "src/Libraries/Nop.Services/Orders/OrderTotalCalculationService.cs"
+  ],
+  "checks": [
+    {
+      "name": "component_sequence",
+      "weight": 35,
+      "required_terms": [
+        "GetShoppingCartSubTotalAsync",
+        "GetShoppingCartShippingTotalAsync",
+        "GetAdditionalHandlingFeeAsync",
+        "GetTaxTotalAsync",
+        "GetOrderTotalDiscountAsync",
+        "AppliedGiftCardsAsync",
+        "SetRewardPointsAsync"
+      ],
+      "ordered_terms": [
+        "GetShoppingCartSubTotalAsync",
+        "GetShoppingCartShippingTotalAsync",
+        "GetAdditionalHandlingFeeAsync",
+        "GetTaxTotalAsync",
+        "GetOrderTotalDiscountAsync",
+        "AppliedGiftCardsAsync",
+        "SetRewardPointsAsync"
+      ]
+    },
+    {
+      "name": "addition_and_subtraction_math",
+      "weight": 25,
+      "required_terms": [
+        "subtotal",
+        "shipping",
+        "payment method additional fee",
+        "tax",
+        "discountAmount",
+        "gift cards",
+        "reward points"
+      ]
+    },
+    {
+      "name": "rounding_points",
+      "weight": 20,
+      "required_terms": [
+        "RoundPricesDuringCalculation",
+        "RoundPriceAsync",
+        "after tax",
+        "after discount",
+        "after gift cards",
+        "after reward points"
+      ]
+    },
+    {
+      "name": "null_shipping_total",
+      "weight": 20,
+      "required_terms": [
+        "shoppingCartShipping.HasValue",
+        "return (null",
+        "discountAmount",
+        "appliedGiftCards",
+        "before reward points"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+[
+  {
+    "id": "get_final_price_overloads",
+    "prompt": "In the nopCommerce codebase, show me all overloads of GetFinalPriceAsync on IPriceCalculationService. For each overload give me the complete signature - exact parameter names, types, default values - and the exact return type.",
+    "ground_truth": "../ground-truth/get-final-price-async.json"
+  },
+  {
+    "id": "order_status_completion",
+    "prompt": "Describe exactly when order status changes to Complete, changes to Processing, or remains unchanged after order status checks. Include payment status, shipping status, paid date, settings-dependent behavior, and cancelled/already-complete cases.",
+    "ground_truth": "../ground-truth/order-status-completion.json"
+  },
+  {
+    "id": "discount_validation_chain",
+    "prompt": "Walk through discount validation in execution order. Include the guards that invalidate before requirement plugins run, the gift-card cart restriction, limitation checks, and how nested requirement groups handle AND versus OR.",
+    "ground_truth": "../ground-truth/discount-validation-chain.json"
+  },
+  {
+    "id": "cart_total_pipeline",
+    "prompt": "Explain the shopping cart total calculation pipeline. List the order of subtotal, shipping, payment fee, tax, order-total discount, gift cards, reward points, rounding, and the condition that returns a null total.",
+    "ground_truth": "../ground-truth/cart-total-pipeline.json"
+  },
+  {
+    "id": "payment_processing_paths",
+    "prompt": "Explain the payment processing paths during order placement for standard carts, recurring carts, and zero-total carts where payment is skipped. Include plugin loading, exceptions, payment status, and checkout post-processing.",
+    "ground_truth": "../ground-truth/payment-processing-paths.json"
+  }
+]

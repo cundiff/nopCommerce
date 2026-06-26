@@ -1,0 +1,66 @@
+{
+  "id": "payment_processing_paths",
+  "rubric": "structured_terms",
+  "source_files": [
+    "src/Libraries/Nop.Services/Orders/OrderProcessingService.cs",
+    "src/Presentation/Nop.Web/Controllers/CheckoutController.cs"
+  ],
+  "checks": [
+    {
+      "name": "payment_required_plugin_path",
+      "weight": 25,
+      "required_terms": [
+        "IsPaymentWorkflowRequiredAsync",
+        "LoadPluginBySystemNameAsync",
+        "Payment method couldn't be loaded",
+        "IsPluginActive",
+        "Payment method is not active"
+      ],
+      "ordered_terms": [
+        "IsPaymentWorkflowRequiredAsync",
+        "LoadPluginBySystemNameAsync",
+        "IsPluginActive"
+      ]
+    },
+    {
+      "name": "standard_vs_recurring_processing",
+      "weight": 30,
+      "required_terms": [
+        "IsRecurringShoppingCart",
+        "GetRecurringPaymentTypeAsync",
+        "RecurringPaymentType.NotSupported",
+        "ProcessRecurringPaymentAsync",
+        "ProcessPaymentAsync",
+        "Not supported recurring payment type"
+      ],
+      "ordered_terms": [
+        "IsRecurringShoppingCart",
+        "GetRecurringPaymentTypeAsync",
+        "ProcessRecurringPaymentAsync"
+      ]
+    },
+    {
+      "name": "zero_total_skip_path",
+      "weight": 20,
+      "required_terms": [
+        "usePaymentMethodAdditionalFee: false",
+        "shoppingCartTotalBase",
+        "decimal.Zero",
+        "ProcessPaymentResult",
+        "PaymentStatus.Paid"
+      ]
+    },
+    {
+      "name": "checkout_post_processing",
+      "weight": 25,
+      "required_terms": [
+        "PlaceOrderAsync",
+        "PostProcessPaymentAsync",
+        "IsRequestBeingRedirected",
+        "IsPostBeingDone",
+        "CHECKOUT_COMPLETED",
+        "CHECKOUT_PAYMENT_INFO"
+      ]
+    }
+  ]
+}

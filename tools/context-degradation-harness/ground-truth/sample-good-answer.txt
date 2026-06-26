@@ -1,0 +1,44 @@
+All overloads of `GetFinalPriceAsync` on `IPriceCalculationService` in `src/Libraries/Nop.Services/Catalog/IPriceCalculationService.cs`:
+
+**Return type (all 3 overloads):**
+`Task<(decimal priceWithoutDiscounts, decimal finalPrice, decimal appliedDiscountAmount, List<Discount> appliedDiscounts)>`
+
+**Overload 1:**
+```csharp
+Task<(decimal priceWithoutDiscounts, decimal finalPrice, decimal appliedDiscountAmount, List<Discount> appliedDiscounts)> GetFinalPriceAsync(
+    Product product,
+    Customer customer,
+    Store store,
+    decimal additionalCharge = 0,
+    bool includeDiscounts = true,
+    int quantity = 1);
+```
+
+**Overload 2:**
+```csharp
+Task<(decimal priceWithoutDiscounts, decimal finalPrice, decimal appliedDiscountAmount, List<Discount> appliedDiscounts)> GetFinalPriceAsync(
+    Product product,
+    Customer customer,
+    Store store,
+    decimal additionalCharge,
+    bool includeDiscounts,
+    int quantity,
+    DateTime? rentalStartDate,
+    DateTime? rentalEndDate);
+```
+
+**Overload 3:**
+```csharp
+Task<(decimal priceWithoutDiscounts, decimal finalPrice, decimal appliedDiscountAmount, List<Discount> appliedDiscounts)> GetFinalPriceAsync(
+    Product product,
+    Customer customer,
+    Store store,
+    decimal? overriddenProductPrice,
+    decimal additionalCharge,
+    bool includeDiscounts,
+    int quantity,
+    DateTime? rentalStartDate,
+    DateTime? rentalEndDate);
+```
+
+There are exactly 3 overloads of `GetFinalPriceAsync` on `IPriceCalculationService`.

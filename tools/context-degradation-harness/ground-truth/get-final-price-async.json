@@ -1,0 +1,50 @@
+{
+  "method": "GetFinalPriceAsync",
+  "interface": "IPriceCalculationService",
+  "file": "src/Libraries/Nop.Services/Catalog/IPriceCalculationService.cs",
+  "overload_count": 3,
+  "return_type": "Task<(decimal priceWithoutDiscounts, decimal finalPrice, decimal appliedDiscountAmount, List<Discount> appliedDiscounts)>",
+  "overloads": [
+    {
+      "id": 1,
+      "signature": "GetFinalPriceAsync(Product product, Customer customer, Store store, decimal additionalCharge = 0, bool includeDiscounts = true, int quantity = 1)",
+      "parameters": [
+        {"name": "product", "type": "Product"},
+        {"name": "customer", "type": "Customer"},
+        {"name": "store", "type": "Store"},
+        {"name": "additionalCharge", "type": "decimal", "default": "0"},
+        {"name": "includeDiscounts", "type": "bool", "default": "true"},
+        {"name": "quantity", "type": "int", "default": "1"}
+      ]
+    },
+    {
+      "id": 2,
+      "signature": "GetFinalPriceAsync(Product product, Customer customer, Store store, decimal additionalCharge, bool includeDiscounts, int quantity, DateTime? rentalStartDate, DateTime? rentalEndDate)",
+      "parameters": [
+        {"name": "product", "type": "Product"},
+        {"name": "customer", "type": "Customer"},
+        {"name": "store", "type": "Store"},
+        {"name": "additionalCharge", "type": "decimal"},
+        {"name": "includeDiscounts", "type": "bool"},
+        {"name": "quantity", "type": "int"},
+        {"name": "rentalStartDate", "type": "DateTime?"},
+        {"name": "rentalEndDate", "type": "DateTime?"}
+      ]
+    },
+    {
+      "id": 3,
+      "signature": "GetFinalPriceAsync(Product product, Customer customer, Store store, decimal? overriddenProductPrice, decimal additionalCharge, bool includeDiscounts, int quantity, DateTime? rentalStartDate, DateTime? rentalEndDate)",
+      "parameters": [
+        {"name": "product", "type": "Product"},
+        {"name": "customer", "type": "Customer"},
+        {"name": "store", "type": "Store"},
+        {"name": "overriddenProductPrice", "type": "decimal?"},
+        {"name": "additionalCharge", "type": "decimal"},
+        {"name": "includeDiscounts", "type": "bool"},
+        {"name": "quantity", "type": "int"},
+        {"name": "rentalStartDate", "type": "DateTime?"},
+        {"name": "rentalEndDate", "type": "DateTime?"}
+      ]
+    }
+  ]
+}

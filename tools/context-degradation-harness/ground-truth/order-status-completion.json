@@ -1,0 +1,64 @@
+{
+  "id": "order_status_completion",
+  "rubric": "structured_terms",
+  "source_files": [
+    "src/Libraries/Nop.Services/Orders/OrderProcessingService.cs",
+    "src/Libraries/Nop.Core/Domain/Orders/OrderSettings.cs"
+  ],
+  "checks": [
+    {
+      "name": "paid_date_and_completion_gate",
+      "weight": 25,
+      "required_terms": [
+        "PaymentStatus.Paid",
+        "PaidDateUtc",
+        "ShippingStatus.ShippingNotRequired",
+        "CompleteOrderWhenDelivered",
+        "ShippingStatus.Delivered",
+        "ShippingStatus.Shipped"
+      ],
+      "ordered_terms": [
+        "PaymentStatus.Paid",
+        "PaidDateUtc",
+        "ShippingStatus.ShippingNotRequired",
+        "CompleteOrderWhenDelivered"
+      ]
+    },
+    {
+      "name": "pending_processing_transitions",
+      "weight": 25,
+      "required_terms": [
+        "OrderStatus.Pending",
+        "PaymentStatus.Authorized",
+        "PaymentStatus.Paid",
+        "ShippingStatus.PartiallyShipped",
+        "OrderStatus.Processing"
+      ],
+      "ordered_terms": [
+        "OrderStatus.Pending",
+        "PaymentStatus.Authorized",
+        "OrderStatus.Processing"
+      ]
+    },
+    {
+      "name": "terminal_status_return",
+      "weight": 20,
+      "required_terms": [
+        "OrderStatus.Cancelled",
+        "OrderStatus.Complete",
+        "UpdateOrderAsync",
+        "return"
+      ]
+    },
+    {
+      "name": "final_complete_save",
+      "weight": 30,
+      "required_terms": [
+        "SetOrderStatusAsync",
+        "OrderStatus.Complete",
+        "needOrderSave",
+        "UpdateOrderAsync"
+      ]
+    }
+  ]
+}

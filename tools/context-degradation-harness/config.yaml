@@ -1,0 +1,9 @@
+workspace: ../..   # nopCommerce root (two levels up from harness dir)
+cursor_model: claude-4.6-sonnet-medium
+claude_model: sonnet
+cursor_bin: agent
+claude_bin: claude
+warmup_sleep_seconds: 1
+warmup_prompt_count: 12
+question_manifest: prompts/questions.json
+output_dir: results

@@ -1,0 +1,63 @@
+{
+  "id": "discount_validation_chain",
+  "rubric": "structured_terms",
+  "source_files": [
+    "src/Libraries/Nop.Services/Discounts/DiscountService.cs",
+    "src/Libraries/Nop.Core/Domain/Discounts/Discount.cs"
+  ],
+  "checks": [
+    {
+      "name": "early_guards_before_requirements",
+      "weight": 30,
+      "required_terms": [
+        "IsActive",
+        "RequiresCouponCode",
+        "CouponCode",
+        "couponCodesToValidate",
+        "StartDateUtc",
+        "EndDateUtc"
+      ],
+      "ordered_terms": [
+        "IsActive",
+        "RequiresCouponCode",
+        "StartDateUtc",
+        "EndDateUtc"
+      ]
+    },
+    {
+      "name": "gift_card_order_discount_restriction",
+      "weight": 20,
+      "required_terms": [
+        "AssignedToOrderSubTotal",
+        "AssignedToOrderTotal",
+        "IShoppingCartService",
+        "HasAnyGiftCardProductAsync",
+        "ShoppingCart.Discount.CannotBeUsedWithGiftCards"
+      ]
+    },
+    {
+      "name": "limitation_checks",
+      "weight": 20,
+      "required_terms": [
+        "DiscountLimitationType.NTimesOnly",
+        "DiscountLimitationType.NTimesPerCustomer",
+        "LimitationTimes",
+        "GetAllDiscountUsageHistoryAsync",
+        "ShoppingCart.Discount.CannotBeUsedAnymore"
+      ]
+    },
+    {
+      "name": "requirement_group_logic",
+      "weight": 30,
+      "required_terms": [
+        "GetAllDiscountRequirementsAsync",
+        "top-level group",
+        "GetValidationResultAsync",
+        "RequirementGroupInteractionType.And",
+        "RequirementGroupInteractionType.Or",
+        "LoadPluginBySystemNameAsync",
+        "IsGroup"
+      ]
+    }
+  ]
+}
