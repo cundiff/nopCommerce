@@ -6,6 +6,8 @@ HARNESS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=../lib/config.sh
 source "${HARNESS_DIR}/lib/config.sh"
+# shellcheck source=../lib/load_warmup_prompts.sh
+source "${HARNESS_DIR}/lib/load_warmup_prompts.sh"
 load_harness_config "$HARNESS_DIR"
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
@@ -84,11 +86,7 @@ echo "  RUN_DIR=$RUN_DIR"
 # Baseline: fresh session, test question only
 run_claude_prompt "baseline" "$TEST_QUESTION"
 
-mapfile -d '' -t WARMUP_PROMPTS < <(python3 "$READ_PROMPTS" --null-delimited)
-if [[ "${#WARMUP_PROMPTS[@]}" -ne 12 ]]; then
-  echo "ERROR: expected 12 warmup prompts, found ${#WARMUP_PROMPTS[@]}" >&2
-  exit 1
-fi
+load_warmup_prompts "$READ_PROMPTS" 12
 
 # Warmup 1: fresh session, capture session_id
 run_claude_prompt "warmup_01" "${WARMUP_PROMPTS[0]}"

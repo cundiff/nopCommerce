@@ -96,7 +96,7 @@ python3 lib/score.py --run-dir results/<timestamp> --json
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `workspace` | `..` | nopCommerce root relative to harness dir |
+| `workspace` | `../..` | nopCommerce root relative to harness dir |
 | `model` | `claude-4.6-sonnet-medium` | Model passed to both CLIs |
 | `cursor_bin` | `agent` | Cursor Agent CLI binary |
 | `claude_bin` | `claude` | Claude Code CLI binary |

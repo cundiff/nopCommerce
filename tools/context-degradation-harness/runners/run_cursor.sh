@@ -6,6 +6,8 @@ HARNESS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=../lib/config.sh
 source "${HARNESS_DIR}/lib/config.sh"
+# shellcheck source=../lib/load_warmup_prompts.sh
+source "${HARNESS_DIR}/lib/load_warmup_prompts.sh"
 load_harness_config "$HARNESS_DIR"
 
 CURSOR_BIN="${CURSOR_BIN:-agent}"
@@ -80,11 +82,7 @@ run_agent_prompt "baseline" "$TEST_QUESTION"
 CHAT_ID="$("$CURSOR_BIN" create-chat)"
 echo "Created chat: $CHAT_ID"
 
-mapfile -d '' -t WARMUP_PROMPTS < <(python3 "$READ_PROMPTS" --null-delimited)
-if [[ "${#WARMUP_PROMPTS[@]}" -ne 12 ]]; then
-  echo "ERROR: expected 12 warmup prompts, found ${#WARMUP_PROMPTS[@]}" >&2
-  exit 1
-fi
+load_warmup_prompts "$READ_PROMPTS" 12
 
 idx=1
 for prompt in "${WARMUP_PROMPTS[@]}"; do
