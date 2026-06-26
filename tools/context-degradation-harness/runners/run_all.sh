@@ -12,6 +12,8 @@ CURSOR_BIN="${CURSOR_BIN:-agent}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 CURSOR_MODEL="${CURSOR_MODEL:-${MODEL:-claude-4.6-sonnet-medium}}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-${MODEL:-sonnet}}"
+WARMUP_PROMPT_COUNT="${WARMUP_PROMPT_COUNT:-12}"
+QUESTION_MANIFEST="${QUESTION_MANIFEST:-prompts/questions.json}"
 
 if [[ -z "${RUN_DIR:-}" ]]; then
   TIMESTAMP="$(date -u +"%Y%m%dT%H%M%SZ")"
@@ -65,6 +67,9 @@ python3 - "$RUN_DIR/manifest.json" <<PY
 import json
 from pathlib import Path
 
+question_manifest = Path("${HARNESS_DIR}") / "${QUESTION_MANIFEST}"
+questions = json.loads(question_manifest.read_text(encoding="utf-8")) if question_manifest.exists() else []
+
 manifest = {
     "created_at": "${TIMESTAMP:-manual}",
     "models": {
@@ -85,6 +90,9 @@ manifest = {
         "cursor_model": "${CURSOR_MODEL}",
         "claude_model": "${CLAUDE_MODEL}",
         "warmup_sleep_seconds": int("${WARMUP_SLEEP_SECONDS}"),
+        "warmup_prompt_count": int("${WARMUP_PROMPT_COUNT}"),
+        "question_manifest": "${QUESTION_MANIFEST}",
+        "question_count": len(questions),
     },
 }
 Path("${RUN_DIR}/manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

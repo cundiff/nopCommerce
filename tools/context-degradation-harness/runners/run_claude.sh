@@ -13,6 +13,7 @@ load_harness_config "$HARNESS_DIR"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 MODEL="${CLAUDE_MODEL:-${MODEL:-sonnet}}"
 WARMUP_SLEEP_SECONDS="${WARMUP_SLEEP_SECONDS:-1}"
+WARMUP_PROMPT_COUNT="${WARMUP_PROMPT_COUNT:-12}"
 PARSE_JSON="${HARNESS_DIR}/lib/parse_json.py"
 VALIDATE_ARTIFACT="${HARNESS_DIR}/lib/validate_artifact.py"
 
@@ -25,7 +26,8 @@ fi
 mkdir -p "$RUN_DIR"
 
 READ_PROMPTS="${HARNESS_DIR}/lib/read_prompts.py"
-TEST_QUESTION="$(python3 "$READ_PROMPTS" --test)"
+QUESTION_TSV="${RUN_DIR}/questions.tsv"
+python3 "$READ_PROMPTS" --questions-tsv > "$QUESTION_TSV"
 
 cd "$NOP_ROOT"
 
@@ -92,10 +94,12 @@ echo "  NOP_ROOT=$NOP_ROOT"
 echo "  MODEL=$MODEL"
 echo "  RUN_DIR=$RUN_DIR"
 
-# Baseline: fresh session, test question only
-run_claude_prompt "baseline" "$TEST_QUESTION"
+# Baseline: fresh sessions, all benchmark questions
+while IFS=$'\t' read -r question_id prompt; do
+  run_claude_prompt "baseline_${question_id}" "$prompt"
+done < "$QUESTION_TSV"
 
-load_warmup_prompts "$READ_PROMPTS" 12
+load_warmup_prompts "$READ_PROMPTS" "$WARMUP_PROMPT_COUNT"
 
 # Warmup 1: fresh session, capture session_id
 run_claude_prompt "warmup_01" "${WARMUP_PROMPTS[0]}"
@@ -108,14 +112,17 @@ echo "Captured session: $SESSION_ID"
 
 # Warmup 2-12 + test: resume same session
 idx=2
-while [[ "$idx" -le 12 ]]; do
+while [[ "$idx" -le "$WARMUP_PROMPT_COUNT" ]]; do
   run_claude_prompt "$(printf 'warmup_%02d' "$idx")" "${WARMUP_PROMPTS[$((idx - 1))]}" "$SESSION_ID"
-  if [[ "$idx" -lt 12 ]]; then
+  if [[ "$idx" -lt "$WARMUP_PROMPT_COUNT" ]]; then
     sleep "$WARMUP_SLEEP_SECONDS"
   fi
   idx=$((idx + 1))
 done
 
-run_claude_prompt "test" "$TEST_QUESTION" "$SESSION_ID"
+# Post-warmup tests in same session
+while IFS=$'\t' read -r question_id prompt; do
+  run_claude_prompt "test_${question_id}" "$prompt" "$SESSION_ID"
+done < "$QUESTION_TSV"
 
 echo "Claude run complete: $RUN_DIR"

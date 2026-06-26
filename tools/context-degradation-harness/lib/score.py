@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Score answers against GetFinalPriceAsync ground truth."""
+"""Score answers against context-degradation benchmark ground truth."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from typing import Any
 
 HARNESS_DIR = Path(__file__).resolve().parent.parent
 GROUND_TRUTH_PATH = HARNESS_DIR / "ground-truth" / "get-final-price-async.json"
+QUESTIONS_PATH = HARNESS_DIR / "prompts" / "questions.json"
 
 CHECKS = [
     ("overload_count", 25),
@@ -58,6 +60,47 @@ class ScoreResult:
         }
 
 
+def resolve_question_manifest(path: Path | None = None, run_dir: Path | None = None) -> Path:
+    if path is not None:
+        questions_path = path
+    elif run_dir is not None:
+        manifest = load_json_file(run_dir / "manifest.json")
+        configured = manifest.get("config", {}).get("question_manifest")
+        questions_path = Path(configured) if configured else QUESTIONS_PATH
+    else:
+        configured = os.environ.get("QUESTION_MANIFEST")
+        questions_path = Path(configured) if configured else QUESTIONS_PATH
+
+    if not questions_path.is_absolute():
+        questions_path = HARNESS_DIR / questions_path
+    return questions_path
+
+
+def load_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def load_questions(path: Path | None = None, run_dir: Path | None = None) -> list[dict[str, Any]]:
+    questions_path = resolve_question_manifest(path, run_dir)
+    if not questions_path.exists():
+        return [
+            {
+                "id": "get_final_price_overloads",
+                "prompt": (HARNESS_DIR / "prompts" / "test-question.txt").read_text(encoding="utf-8").strip(),
+                "ground_truth_path": str(GROUND_TRUTH_PATH),
+            }
+        ]
+
+    sys.path.insert(0, str(HARNESS_DIR / "lib"))
+    from read_prompts import load_question_manifest
+
+    return load_question_manifest(questions_path)
+
+
 def load_ground_truth(path: Path | None = None) -> dict[str, Any]:
     gt_path = path or GROUND_TRUTH_PATH
     with gt_path.open(encoding="utf-8") as f:
@@ -69,6 +112,22 @@ def normalize_text(text: str) -> str:
     text = text.replace("```", "")
     text = text.replace("\r\n", "\n")
     return text
+
+
+def normalize_for_terms(text: str) -> str:
+    return re.sub(r"\s+", " ", normalize_text(text).lower()).strip()
+
+
+def term_found(normalized_text: str, term: str | list[str]) -> bool:
+    if isinstance(term, list):
+        return any(term_found(normalized_text, option) for option in term)
+    return normalize_for_terms(str(term)) in normalized_text
+
+
+def describe_term(term: str | list[str]) -> str:
+    if isinstance(term, list):
+        return " / ".join(str(option) for option in term)
+    return str(term)
 
 
 def count_overload_mentions(text: str) -> int:
@@ -268,8 +327,55 @@ def check_source_grounding(text: str, ground_truth: dict[str, Any]) -> CheckResu
     return CheckResult("source_grounding", weight, passed, detail)
 
 
+def score_structured_terms(text: str, answer_path: str, ground_truth: dict[str, Any]) -> ScoreResult:
+    normalized = normalize_for_terms(text)
+    checks: list[CheckResult] = []
+
+    for check in ground_truth.get("checks", []):
+        name = check["name"]
+        weight = int(check["weight"])
+        required_terms = check.get("required_terms", [])
+        missing = [term for term in required_terms if not term_found(normalized, term)]
+
+        ordered_terms = check.get("ordered_terms", [])
+        order_ok = True
+        if ordered_terms:
+            cursor = -1
+            for term in ordered_terms:
+                options = term if isinstance(term, list) else [term]
+                positions = [
+                    normalized.find(normalize_for_terms(str(option)), cursor + 1)
+                    for option in options
+                ]
+                positions = [position for position in positions if position >= 0]
+                if not positions:
+                    order_ok = False
+                    break
+                cursor = min(positions)
+
+        forbidden_terms = check.get("forbidden_terms", [])
+        present_forbidden = [term for term in forbidden_terms if term_found(normalized, term)]
+
+        passed = not missing and order_ok and not present_forbidden
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(describe_term(term) for term in missing))
+        if not order_ok:
+            details.append("ordered terms not found in expected order")
+        if present_forbidden:
+            details.append("forbidden: " + ", ".join(describe_term(term) for term in present_forbidden))
+        checks.append(CheckResult(name, weight, passed, "; ".join(details) if details else "all required terms present"))
+
+    total = sum(c.weight for c in checks if c.passed)
+    max_score = sum(int(check["weight"]) for check in ground_truth.get("checks", [])) or 100
+    return ScoreResult(answer_path=answer_path, total_score=total, max_score=max_score, checks=checks)
+
+
 def score_answer_text(text: str, answer_path: str = "<inline>", ground_truth: dict[str, Any] | None = None) -> ScoreResult:
     gt = ground_truth or load_ground_truth()
+    if gt.get("rubric") == "structured_terms":
+        return score_structured_terms(text, answer_path, gt)
+
     normalized = normalize_text(text)
     signatures = extract_signatures(normalized)
 
@@ -322,32 +428,68 @@ def load_answer_from_artifact(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def score_run_directory(run_dir: Path) -> dict[str, Any]:
-    results: dict[str, Any] = {"run_dir": str(run_dir), "tools": {}}
+def score_run_directory(run_dir: Path, questions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    questions = questions or load_questions(run_dir=run_dir)
+    results: dict[str, Any] = {
+        "run_dir": str(run_dir),
+        "questions": [
+            {"id": question["id"], "prompt": question.get("prompt", "")}
+            for question in questions
+        ],
+        "tools": {},
+    }
 
     for tool in ("cursor", "claude"):
         tool_dir = run_dir / tool
         if not tool_dir.is_dir():
             continue
-        tool_scores: dict[str, Any] = {}
-        for label in ["baseline", "test"]:
-            txt_path = tool_dir / f"{label}.txt"
-            json_path = tool_dir / f"{label}.json"
-            answer_path = txt_path if txt_path.exists() else json_path
-            if not answer_path.exists():
-                continue
-            if answer_path.suffix == ".json":
-                text = load_answer_from_artifact(answer_path)
-                scored = score_answer_text(text, str(answer_path))
-            else:
-                scored = score_answer_file(answer_path)
-            tool_scores[label] = scored.to_dict()
+        tool_scores: dict[str, Any] = {"questions": {}}
+        baseline_total = 0
+        test_total = 0
+        max_total = 0
 
-        if tool_scores:
-            baseline = tool_scores.get("baseline", {}).get("total_score")
-            test = tool_scores.get("test", {}).get("total_score")
+        for question in questions:
+            question_id = question["id"]
+            ground_truth = load_ground_truth(Path(question["ground_truth_path"]))
+            question_scores: dict[str, Any] = {}
+
+            for phase in ["baseline", "test"]:
+                label = f"{phase}_{question_id}"
+                legacy_label = phase if len(questions) == 1 else label
+                txt_path = tool_dir / f"{label}.txt"
+                json_path = tool_dir / f"{label}.json"
+                if not txt_path.exists() and not json_path.exists():
+                    txt_path = tool_dir / f"{legacy_label}.txt"
+                    json_path = tool_dir / f"{legacy_label}.json"
+                answer_path = txt_path if txt_path.exists() else json_path
+                if not answer_path.exists():
+                    continue
+                if answer_path.suffix == ".json":
+                    text = load_answer_from_artifact(answer_path)
+                    scored = score_answer_text(text, str(answer_path), ground_truth)
+                else:
+                    scored = score_answer_file(answer_path, ground_truth)
+                question_scores[phase] = scored.to_dict()
+
+            baseline = question_scores.get("baseline", {}).get("total_score")
+            test = question_scores.get("test", {}).get("total_score")
+            max_score = question_scores.get("baseline", {}).get("max_score") or question_scores.get("test", {}).get("max_score")
             if baseline is not None and test is not None:
-                tool_scores["degradation_delta"] = baseline - test
+                question_scores["degradation_delta"] = baseline - test
+                baseline_total += baseline
+                test_total += test
+                max_total += int(max_score or 0)
+
+            if question_scores:
+                tool_scores["questions"][question_id] = question_scores
+
+        if tool_scores["questions"]:
+            tool_scores["aggregate"] = {
+                "baseline_score": baseline_total,
+                "test_score": test_total,
+                "max_score": max_total,
+                "degradation_delta": baseline_total - test_total,
+            }
             results["tools"][tool] = tool_scores
 
     scores_path = run_dir / "scores.json"

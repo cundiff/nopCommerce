@@ -13,6 +13,7 @@ load_harness_config "$HARNESS_DIR"
 CURSOR_BIN="${CURSOR_BIN:-agent}"
 MODEL="${CURSOR_MODEL:-${MODEL:-claude-4.6-sonnet-medium}}"
 WARMUP_SLEEP_SECONDS="${WARMUP_SLEEP_SECONDS:-1}"
+WARMUP_PROMPT_COUNT="${WARMUP_PROMPT_COUNT:-12}"
 PARSE_JSON="${HARNESS_DIR}/lib/parse_json.py"
 VALIDATE_ARTIFACT="${HARNESS_DIR}/lib/validate_artifact.py"
 
@@ -25,7 +26,8 @@ fi
 mkdir -p "$RUN_DIR"
 
 READ_PROMPTS="${HARNESS_DIR}/lib/read_prompts.py"
-TEST_QUESTION="$(python3 "$READ_PROMPTS" --test)"
+QUESTION_TSV="${RUN_DIR}/questions.tsv"
+python3 "$READ_PROMPTS" --questions-tsv > "$QUESTION_TSV"
 
 save_artifact() {
   local label="$1"
@@ -84,25 +86,29 @@ echo "  RUN_DIR=$RUN_DIR"
 
 cd "$NOP_ROOT"
 
-# Baseline: fresh session, test question only
-run_agent_prompt "baseline" "$TEST_QUESTION"
+# Baseline: fresh sessions, all benchmark questions
+while IFS=$'\t' read -r question_id prompt; do
+  run_agent_prompt "baseline_${question_id}" "$prompt"
+done < "$QUESTION_TSV"
 
-# Warmup: create chat, run 12 prompts with resume
+# Warmup: create chat, run prompts with resume
 CHAT_ID="$("$CURSOR_BIN" create-chat)"
 echo "Created chat: $CHAT_ID"
 
-load_warmup_prompts "$READ_PROMPTS" 12
+load_warmup_prompts "$READ_PROMPTS" "$WARMUP_PROMPT_COUNT"
 
 idx=1
 for prompt in "${WARMUP_PROMPTS[@]}"; do
   run_agent_prompt "$(printf 'warmup_%02d' "$idx")" "$prompt" "$CHAT_ID"
-  if [[ "$idx" -lt 12 ]]; then
+  if [[ "$idx" -lt "$WARMUP_PROMPT_COUNT" ]]; then
     sleep "$WARMUP_SLEEP_SECONDS"
   fi
   idx=$((idx + 1))
 done
 
-# Post-warmup test in same chat
-run_agent_prompt "test" "$TEST_QUESTION" "$CHAT_ID"
+# Post-warmup tests in same chat
+while IFS=$'\t' read -r question_id prompt; do
+  run_agent_prompt "test_${question_id}" "$prompt" "$CHAT_ID"
+done < "$QUESTION_TSV"
 
 echo "Cursor run complete: $RUN_DIR"

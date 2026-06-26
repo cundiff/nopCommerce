@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,14 @@ def format_usage(usage: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+def input_token_count(usage: dict[str, Any]) -> Any:
+    return usage.get("inputTokens", usage.get("input_tokens", "n/a"))
+
+
+def cache_token_count(usage: dict[str, Any]) -> Any:
+    return usage.get("cacheReadTokens", usage.get("cache_read_input_tokens", "n/a"))
+
+
 def truncate(text: str, limit: int = EXCERPT_LIMIT) -> str:
     text = text.strip()
     if len(text) <= limit:
@@ -61,7 +70,12 @@ def truncate(text: str, limit: int = EXCERPT_LIMIT) -> str:
 
 def warmup_token_series(tool_dir: Path) -> list[tuple[int, dict[str, Any]]]:
     series: list[tuple[int, dict[str, Any]]] = []
-    for i in range(1, 13):
+    labels = []
+    for path in tool_dir.glob("warmup_*.json"):
+        match = re.fullmatch(r"warmup_(\d+)\.json", path.name)
+        if match:
+            labels.append(int(match.group(1)))
+    for i in sorted(labels):
         label = f"warmup_{i:02d}"
         usage = read_usage(tool_dir, label)
         if usage:
@@ -87,6 +101,118 @@ def rubric_table(tool_scores: dict[str, Any]) -> str:
         t_status = "PASS" if t.get("passed") else "FAIL"
         lines.append(f"| {name} | {b_status} | {t_status} |")
     return "\n".join(lines)
+
+
+def question_rubric_table(question_scores: dict[str, Any]) -> str:
+    baseline_checks = {
+        c["name"]: c for c in question_scores.get("baseline", {}).get("checks", [])
+    }
+    test_checks = {c["name"]: c for c in question_scores.get("test", {}).get("checks", [])}
+    names = sorted(set(baseline_checks) | set(test_checks))
+
+    lines = [
+        "| Check | Baseline | Post-warmup |",
+        "|-------|----------|-------------|",
+    ]
+    for name in names:
+        b = baseline_checks.get(name, {})
+        t = test_checks.get(name, {})
+        b_status = "PASS" if b.get("passed") else "FAIL"
+        t_status = "PASS" if t.get("passed") else "FAIL"
+        lines.append(f"| {name} | {b_status} | {t_status} |")
+    return "\n".join(lines)
+
+
+def generate_suite_report(run_dir: Path, manifest: dict[str, Any], scores: dict[str, Any]) -> list[str]:
+    lines = [
+        "## Summary",
+        "",
+        "| Tool | Baseline Score | Post-warmup Score | Max Score | Delta |",
+        "|------|----------------|-------------------|-----------|-------|",
+    ]
+
+    tool_entries: list[tuple[str, dict[str, Any]]] = []
+    for tool in ("cursor", "claude"):
+        tool_scores = scores.get("tools", {}).get(tool, {})
+        if not tool_scores:
+            continue
+        tool_entries.append((tool, tool_scores))
+        aggregate = tool_scores.get("aggregate", {})
+        lines.append(
+            "| {tool} | {baseline} | {test} | {max_score} | {delta} |".format(
+                tool=tool,
+                baseline=aggregate.get("baseline_score", "n/a"),
+                test=aggregate.get("test_score", "n/a"),
+                max_score=aggregate.get("max_score", "n/a"),
+                delta=aggregate.get("degradation_delta", "n/a"),
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "Single-run CLI-stack comparison; use repeated runs before making winner claims.",
+            "",
+        ]
+    )
+
+    question_prompts = {
+        question.get("id"): question.get("prompt", "")
+        for question in scores.get("questions", [])
+    }
+
+    for tool, tool_scores in tool_entries:
+        tool_dir = run_dir / tool
+        lines.extend([f"## {tool.title()} Details", ""])
+
+        series = warmup_token_series(tool_dir)
+        if series:
+            lines.extend(["### Context Growth", ""])
+            for step, usage in series:
+                lines.append(
+                    f"- Warmup {step:02d}: input={input_token_count(usage)}, cache_read={cache_token_count(usage)}"
+                )
+            lines.append("")
+
+        lines.extend(
+            [
+                "### Per-question Scores",
+                "",
+                "| Question | Baseline | Post-warmup | Delta | Test Input | Test Cache Read |",
+                "|----------|----------|-------------|-------|------------|-----------------|",
+            ]
+        )
+        for question_id, question_scores in tool_scores.get("questions", {}).items():
+            baseline = question_scores.get("baseline", {}).get("total_score", "n/a")
+            test = question_scores.get("test", {}).get("total_score", "n/a")
+            delta = question_scores.get("degradation_delta", "n/a")
+            usage = read_usage(tool_dir, f"test_{question_id}")
+            lines.append(
+                f"| {question_id} | {baseline} | {test} | {delta} | {input_token_count(usage)} | {cache_token_count(usage)} |"
+            )
+        lines.append("")
+
+        for question_id, question_scores in tool_scores.get("questions", {}).items():
+            lines.extend(
+                [
+                    f"### {question_id}",
+                    "",
+                    question_prompts.get(question_id, ""),
+                    "",
+                    question_rubric_table(question_scores),
+                    "",
+                    "#### Post-warmup excerpt",
+                    "",
+                    "```",
+                    truncate(read_answer_text(tool_dir, f"test_{question_id}")),
+                    "```",
+                    "",
+                    f"Full answer: `{tool_dir / f'test_{question_id}.txt'}`",
+                    "",
+                ]
+            )
+
+    return lines
 
 
 def generate_report(run_dir: Path) -> str:
@@ -122,6 +248,10 @@ def generate_report(run_dir: Path) -> str:
             for tool, version in versions.items():
                 lines.append(f"  - {tool}: `{version}`")
         lines.append("")
+
+    if any("questions" in tool_scores for tool_scores in scores.get("tools", {}).values()):
+        lines.extend(generate_suite_report(run_dir, manifest, scores))
+        return "\n".join(lines)
 
     lines.extend(
         [

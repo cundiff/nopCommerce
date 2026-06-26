@@ -75,12 +75,16 @@ pairs = {
     "WARMUP_SLEEP_SECONDS": str(
         os.environ.get("WARMUP_SLEEP_SECONDS") or data.get("warmup_sleep_seconds", 1)
     ),
+    "WARMUP_PROMPT_COUNT": str(
+        os.environ.get("WARMUP_PROMPT_COUNT") or data.get("warmup_prompt_count", 12)
+    ),
+    "QUESTION_MANIFEST": os.environ.get("QUESTION_MANIFEST") or data.get("question_manifest", "prompts/questions.json"),
     "OUTPUT_DIR_NAME": os.environ.get("OUTPUT_DIR_NAME") or data.get("output_dir", "results"),
 }
 
 for key, value in pairs.items():
     escaped = str(value).replace("'", "'\\''")
-    print(f"{key}='{escaped}'")
+    print(f"export {key}='{escaped}'")
 PY
 )"
 }

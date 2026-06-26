@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 HARNESS_DIR = Path(__file__).resolve().parents[1]
@@ -51,7 +53,9 @@ class CliArtifactValidationTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertNotEqual(validate_artifact(artifact, "baseline"), 0)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                self.assertNotEqual(validate_artifact(artifact, "baseline"), 0)
 
 
 if __name__ == "__main__":
