@@ -21,12 +21,22 @@ cloud VM we run directly with the .NET SDK + a local PostgreSQL instead).
 ### Starting services (NOT done by the update script — do these yourself)
 1. **Start PostgreSQL** (it does not auto-start on boot):
    `sudo pg_ctlcluster 16 main start`
-2. **Frontend libs** — `src/Presentation/Nop.Web/wwwroot/lib_npm` (the JS/CSS the views reference) is
+   - **Snapshot gotcha:** the PostgreSQL *data* (the installed `nopcommerce` DB with sample data)
+     persists across VM snapshots, but the runtime `App_Data/appsettings.json` does **not** — it
+     regenerates with an empty connection string, so the app redirects `/` → `/install`. Do **not**
+     reinstall. Instead restore the saved connection string in
+     `src/Presentation/Nop.Web/App_Data/appsettings.json`:
+     `"ConnectionString": "Host=127.0.0.1;Database=nopcommerce;Username=nop;Password=noppass"` and
+     `"DataProvider": "postgresql"`, then start the app.
+2. **Build first if needed** — `bin/`/`obj`/`Plugins` build outputs are not snapshotted, so
+   `dotnet run --no-build` will fail on a fresh VM. Run `dotnet build src/NopCommerce.sln -c Release`
+   once (this also populates the runtime `Plugins` folder), then you can use `--no-build`.
+3. **Frontend libs** — `src/Presentation/Nop.Web/wwwroot/lib_npm` (the JS/CSS the views reference) is
    **committed**, so the storefront renders out of the box; no npm/gulp step is needed just to run.
    For frontend work, install node deps with `npm install --prefix src/Presentation/Nop.Web` and
    regenerate the vendored libs by running `npx gulp` from `src/Presentation/Nop.Web` (clean →
    copyDependencies → prepareCldr). Note `npm install` rewrites `package-lock.json`.
-3. **Run the web app** from `src/Presentation/Nop.Web`. There is **no `launchSettings.json`**, so set
+4. **Run the web app** from `src/Presentation/Nop.Web`. There is **no `launchSettings.json`**, so set
    the URL explicitly:
    `ASPNETCORE_ENVIRONMENT=Development ASPNETCORE_URLS=http://0.0.0.0:5000 dotnet run`
    Then open `http://localhost:5000`.
