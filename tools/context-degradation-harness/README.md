@@ -1,6 +1,6 @@
 # Context Fill Degradation Harness
 
-Reproducible experiment harness for measuring how answer quality changes after filling an agent session with warmup prompts. Compares **Cursor Agent CLI** and **Claude Code CLI** on the same model against ground-truth signatures for `GetFinalPriceAsync` on `IPriceCalculationService`.
+Reproducible experiment harness for measuring how answer quality changes after filling an agent session with warmup prompts. Compares **Cursor Agent CLI** and **Claude Code CLI** against ground-truth signatures for `GetFinalPriceAsync` on `IPriceCalculationService`.
 
 ## Experiment Shape
 
@@ -28,7 +28,8 @@ export CLAUDE_BIN=/path/to/real/claude
 Override any config value via environment variables after sourcing is not needed — edit `config.yaml` or export before running:
 
 ```bash
-export MODEL=claude-4.6-sonnet-medium
+export CURSOR_MODEL=claude-4.6-sonnet-medium
+export CLAUDE_MODEL=sonnet
 export CLAUDE_BIN=claude
 ```
 
@@ -97,7 +98,9 @@ python3 lib/score.py --run-dir results/<timestamp> --json
 | Key | Default | Description |
 |-----|---------|-------------|
 | `workspace` | `../..` | nopCommerce root relative to harness dir |
-| `model` | `claude-4.6-sonnet-medium` | Model passed to both CLIs |
+| `model` | unset | Optional shared model passed to both CLIs when tool-specific values are not set |
+| `cursor_model` | `claude-4.6-sonnet-medium` | Model passed to Cursor Agent CLI |
+| `claude_model` | `sonnet` | Model passed to Claude Code CLI |
 | `cursor_bin` | `agent` | Cursor Agent CLI binary |
 | `claude_bin` | `claude` | Claude Code CLI binary |
 | `warmup_sleep_seconds` | `1` | Pause between warmup prompts |
@@ -122,12 +125,13 @@ Degradation delta = `baseline_score - post_warmup_score`.
 - Baseline: fresh session (no `--resume`)
 - Warmup: `agent create-chat`, then 12× `--resume CHAT_ID`
 - Test: same `CHAT_ID`
-- Flags: `-p --mode ask --trust --workspace "$NOP_ROOT" --model "$MODEL" --output-format json`
+- Flags: `-p --mode ask --trust --workspace "$NOP_ROOT" --model "$CURSOR_MODEL" --output-format json`
 
 **Claude** (`run_claude.sh`):
 - Baseline: fresh `-p`
 - Warmup 1: fresh `-p`, capture `session_id` from JSON
 - Warmup 2–12 + test: `--resume SESSION_ID -p`
+- Uses `--model "$CLAUDE_MODEL"` because Claude Code model aliases differ from Cursor model IDs
 - Runs from nopCommerce root (`cd` matters for per-directory session scope)
 - No `--bare` flag (loads realistic project context)
 
@@ -138,7 +142,10 @@ Degradation delta = `baseline_score - post_warmup_score`.
 python3 lib/score.py --answer ground-truth/sample-good-answer.txt
 
 # Python syntax check
-python3 -m py_compile lib/score.py lib/report.py lib/parse_json.py lib/read_prompts.py
+python3 -m py_compile lib/score.py lib/report.py lib/parse_json.py lib/read_prompts.py lib/validate_artifact.py
+
+# Regression tests
+python3 -m unittest discover tests
 
 # Script executability
 test -x runners/run_all.sh && test -x runners/run_cursor.sh && test -x runners/run_claude.sh
@@ -149,3 +156,4 @@ test -x runners/run_all.sh && test -x runners/run_cursor.sh && test -x runners/r
 - `results/` is gitignored; commit only harness source, not run artifacts.
 - Tools run sequentially in `run_all.sh` to avoid session collisions in the same workspace.
 - Token usage is captured from CLI JSON (`inputTokens`, `outputTokens`, cache fields when present).
+- Parsed CLI artifacts with `is_error: true`, parse errors, or empty results fail the run instead of being scored.

@@ -77,6 +77,8 @@ def parse_cli_output(text: str) -> dict[str, Any]:
             "result": text.strip(),
             "session_id": "",
             "usage": {},
+            "is_error": True,
+            "api_error_status": None,
             "raw_json": None,
             "parse_error": "no JSON object found in CLI output",
         }
@@ -86,6 +88,8 @@ def parse_cli_output(text: str) -> dict[str, Any]:
         "result": pick_result_text(obj),
         "session_id": pick_session_id(obj),
         "usage": pick_usage(obj),
+        "is_error": bool(obj.get("is_error", False)),
+        "api_error_status": obj.get("api_error_status"),
         "raw_json": obj,
         "parse_error": None,
     }

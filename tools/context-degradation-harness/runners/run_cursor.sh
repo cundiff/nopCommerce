@@ -11,9 +11,10 @@ source "${HARNESS_DIR}/lib/load_warmup_prompts.sh"
 load_harness_config "$HARNESS_DIR"
 
 CURSOR_BIN="${CURSOR_BIN:-agent}"
-MODEL="${MODEL:-claude-4.6-sonnet-medium}"
+MODEL="${CURSOR_MODEL:-${MODEL:-claude-4.6-sonnet-medium}}"
 WARMUP_SLEEP_SECONDS="${WARMUP_SLEEP_SECONDS:-1}"
 PARSE_JSON="${HARNESS_DIR}/lib/parse_json.py"
+VALIDATE_ARTIFACT="${HARNESS_DIR}/lib/validate_artifact.py"
 
 if [[ -z "${RUN_DIR:-}" ]]; then
   TIMESTAMP="$(date -u +"%Y%m%dT%H%M%SZ")"
@@ -62,10 +63,18 @@ run_agent_prompt() {
   fi
 
   echo "[$label] Running Cursor agent..."
-  if ! "$CURSOR_BIN" "${args[@]}" "$prompt" > "$raw_file" 2>&1; then
-    echo "WARNING: Cursor agent exited non-zero for ${label}; preserving raw output." >&2
+  set +e
+  "$CURSOR_BIN" "${args[@]}" "$prompt" > "$raw_file" 2>&1
+  local cli_status=$?
+  set -e
+  if [[ "$cli_status" -ne 0 ]]; then
+    echo "ERROR: Cursor agent exited non-zero for ${label}; preserving raw output." >&2
   fi
   save_artifact "$label" "$raw_file" "$parsed_file"
+  python3 "$VALIDATE_ARTIFACT" "$parsed_file" "$label"
+  if [[ "$cli_status" -ne 0 ]]; then
+    return "$cli_status"
+  fi
 }
 
 echo "Cursor runner"

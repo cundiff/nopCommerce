@@ -10,7 +10,8 @@ load_harness_config "$HARNESS_DIR"
 
 CURSOR_BIN="${CURSOR_BIN:-agent}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
-MODEL="${MODEL:-claude-4.6-sonnet-medium}"
+CURSOR_MODEL="${CURSOR_MODEL:-${MODEL:-claude-4.6-sonnet-medium}}"
+CLAUDE_MODEL="${CLAUDE_MODEL:-${MODEL:-sonnet}}"
 
 if [[ -z "${RUN_DIR:-}" ]]; then
   TIMESTAMP="$(date -u +"%Y%m%dT%H%M%SZ")"
@@ -66,7 +67,10 @@ from pathlib import Path
 
 manifest = {
     "created_at": "${TIMESTAMP:-manual}",
-    "model": "${MODEL}",
+    "models": {
+        "cursor": "${CURSOR_MODEL}",
+        "claude": "${CLAUDE_MODEL}",
+    },
     "workspace": "${NOP_ROOT}",
     "git_sha": "${GIT_SHA}",
     "harness_dir": "${HARNESS_DIR}",
@@ -78,6 +82,8 @@ manifest = {
     "config": {
         "cursor_bin": "${CURSOR_BIN}",
         "claude_bin": "${CLAUDE_BIN}",
+        "cursor_model": "${CURSOR_MODEL}",
+        "claude_model": "${CLAUDE_MODEL}",
         "warmup_sleep_seconds": int("${WARMUP_SLEEP_SECONDS}"),
     },
 }

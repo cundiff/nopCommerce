@@ -13,6 +13,7 @@ load_harness_config() {
 
   # shellcheck disable=SC1090
   eval "$(python3 - "$config_file" <<'PY'
+import os
 import sys
 from pathlib import Path
 
@@ -47,17 +48,34 @@ else:
     data = parse_simple_yaml(text)
 
 harness_dir = config_path.parent.resolve()
-workspace = data.get("workspace", "..")
+workspace = os.environ.get("WORKSPACE") or data.get("workspace", "..")
 nop_root = (harness_dir / workspace).resolve()
+shared_model = os.environ.get("MODEL") or data.get("model", "")
+cursor_model = (
+    os.environ.get("CURSOR_MODEL")
+    or data.get("cursor_model")
+    or shared_model
+    or "claude-4.6-sonnet-medium"
+)
+claude_model = (
+    os.environ.get("CLAUDE_MODEL")
+    or data.get("claude_model")
+    or shared_model
+    or "sonnet"
+)
 
 pairs = {
     "HARNESS_DIR": str(harness_dir),
     "NOP_ROOT": str(nop_root),
-    "MODEL": data.get("model", "claude-4.6-sonnet-medium"),
-    "CURSOR_BIN": data.get("cursor_bin", "agent"),
-    "CLAUDE_BIN": data.get("claude_bin", "claude"),
-    "WARMUP_SLEEP_SECONDS": str(data.get("warmup_sleep_seconds", 1)),
-    "OUTPUT_DIR_NAME": data.get("output_dir", "results"),
+    "MODEL": shared_model,
+    "CURSOR_MODEL": cursor_model,
+    "CLAUDE_MODEL": claude_model,
+    "CURSOR_BIN": os.environ.get("CURSOR_BIN") or data.get("cursor_bin", "agent"),
+    "CLAUDE_BIN": os.environ.get("CLAUDE_BIN") or data.get("claude_bin", "claude"),
+    "WARMUP_SLEEP_SECONDS": str(
+        os.environ.get("WARMUP_SLEEP_SECONDS") or data.get("warmup_sleep_seconds", 1)
+    ),
+    "OUTPUT_DIR_NAME": os.environ.get("OUTPUT_DIR_NAME") or data.get("output_dir", "results"),
 }
 
 for key, value in pairs.items():

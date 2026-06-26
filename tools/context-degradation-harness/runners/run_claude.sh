@@ -11,9 +11,10 @@ source "${HARNESS_DIR}/lib/load_warmup_prompts.sh"
 load_harness_config "$HARNESS_DIR"
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
-MODEL="${MODEL:-claude-4.6-sonnet-medium}"
+MODEL="${CLAUDE_MODEL:-${MODEL:-sonnet}}"
 WARMUP_SLEEP_SECONDS="${WARMUP_SLEEP_SECONDS:-1}"
 PARSE_JSON="${HARNESS_DIR}/lib/parse_json.py"
+VALIDATE_ARTIFACT="${HARNESS_DIR}/lib/validate_artifact.py"
 
 if [[ -z "${RUN_DIR:-}" ]]; then
   TIMESTAMP="$(date -u +"%Y%m%dT%H%M%SZ")"
@@ -72,10 +73,18 @@ run_claude_prompt() {
   fi
 
   echo "[$label] Running Claude Code..."
-  if ! "$CLAUDE_BIN" "${args[@]}" "$prompt" > "$raw_file" 2>&1; then
-    echo "WARNING: Claude CLI exited non-zero for ${label}; preserving raw output." >&2
+  set +e
+  "$CLAUDE_BIN" "${args[@]}" "$prompt" > "$raw_file" 2>&1
+  local cli_status=$?
+  set -e
+  if [[ "$cli_status" -ne 0 ]]; then
+    echo "ERROR: Claude CLI exited non-zero for ${label}; preserving raw output." >&2
   fi
   save_artifact "$label" "$raw_file" "$parsed_file"
+  python3 "$VALIDATE_ARTIFACT" "$parsed_file" "$label"
+  if [[ "$cli_status" -ne 0 ]]; then
+    return "$cli_status"
+  fi
 }
 
 echo "Claude runner"

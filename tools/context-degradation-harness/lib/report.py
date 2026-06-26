@@ -102,11 +102,16 @@ def generate_report(run_dir: Path) -> str:
     ]
 
     if manifest:
+        models = manifest.get("models")
+        if isinstance(models, dict):
+            model_line = ", ".join(f"{tool}=`{model}`" for tool, model in models.items())
+        else:
+            model_line = f"`{manifest.get('model', 'unknown')}`"
         lines.extend(
             [
                 "## Run Metadata",
                 "",
-                f"- Model: `{manifest.get('model', 'unknown')}`",
+                f"- Models: {model_line}",
                 f"- Git SHA: `{manifest.get('git_sha', 'unknown')}`",
                 f"- Workspace: `{manifest.get('workspace', 'unknown')}`",
             ]
