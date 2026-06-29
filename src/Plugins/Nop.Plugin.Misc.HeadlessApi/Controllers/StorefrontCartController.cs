@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Nop.Core;
+using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Orders;
 using Nop.Plugin.Misc.HeadlessApi.Models;
 using Nop.Plugin.Misc.HeadlessApi.Services;
@@ -45,16 +46,32 @@ public class StorefrontCartController : HeadlessApiControllerBase
 
     #region Utilities
 
-    private async Task<string> ResolveAttributesXmlAsync(int productId, int? combinationId)
+    private async Task<(bool isValid, string attributesXml, string error)> ResolveAttributesXmlAsync(Product product, int? combinationId)
     {
         if (!combinationId.HasValue)
-            return string.Empty;
+            return (true, string.Empty, null);
 
         var combination = await _productAttributeService.GetProductAttributeCombinationByIdAsync(combinationId.Value);
-        if (combination == null || combination.ProductId != productId)
-            return string.Empty;
+        if (combination == null || combination.ProductId != product.Id)
+            return (false, string.Empty, "Variant is invalid for this product.");
 
-        return combination.AttributesXml;
+        var (availableForSale, availabilityStatus) = HeadlessApiModelFactory.GetAvailabilityForCombination(
+            product,
+            combination);
+        if (!availableForSale)
+            return (false, string.Empty, $"Variant is {availabilityStatus}.");
+
+        return (true, combination.AttributesXml, null);
+    }
+
+    private IActionResult BuildBadRequest(string merchandiseId, string error, int lineIndex)
+    {
+        return BadRequest(new
+        {
+            error,
+            merchandiseId,
+            line = lineIndex
+        });
     }
 
     #endregion
@@ -98,22 +115,37 @@ public class StorefrontCartController : HeadlessApiControllerBase
         if (customer == null)
             return Unauthorized();
 
-        var store = await _storeContext.GetCurrentStoreAsync();
+        if (request?.Lines == null || !request.Lines.Any())
+            return BadRequest(new { error = "At least one cart line is required." });
 
-        foreach (var line in request?.Lines ?? new List<AddToCartLineRequest>())
+        var store = await _storeContext.GetCurrentStoreAsync();
+        for (var index = 0; index < request.Lines.Count; index++)
         {
+            var line = request.Lines[index];
             if (!HeadlessApiModelFactory.TryParseVariantId(line.MerchandiseId, out var productId, out var combinationId))
-                continue;
+                return BuildBadRequest(line.MerchandiseId, "Merchandise identifier is invalid.", index);
 
             var product = await _productService.GetProductByIdAsync(productId);
             if (product == null || product.Deleted || !product.Published)
-                continue;
+                return BuildBadRequest(line.MerchandiseId, "Product was not found.", index);
 
-            var attributesXml = await ResolveAttributesXmlAsync(productId, combinationId);
+            if (!combinationId.HasValue)
+            {
+                var (productAvailable, availabilityStatus) = HeadlessApiModelFactory.GetAvailabilityForProduct(product);
+                if (!productAvailable)
+                    return BuildBadRequest(line.MerchandiseId, $"Product is {availabilityStatus}.", index);
+            }
+
+            var (attributesValid, attributesXml, attributesError) = await ResolveAttributesXmlAsync(product, combinationId);
+            if (!attributesValid)
+                return BuildBadRequest(line.MerchandiseId, attributesError, index);
+
             var quantity = line.Quantity > 0 ? line.Quantity : 1;
-
-            await _shoppingCartService.AddToCartAsync(customer, product,
+            var warnings = await _shoppingCartService.AddToCartAsync(customer, product,
                 ShoppingCartType.ShoppingCart, store.Id, attributesXml, quantity: quantity);
+
+            if (warnings.Any())
+                return BuildBadRequest(line.MerchandiseId, string.Join(" ", warnings), index);
         }
 
         return JsonApi(await _modelFactory.PrepareCartDtoAsync(customer, token));
