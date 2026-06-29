@@ -85,11 +85,91 @@ public class HeadlessApiModelFactory
     }
 
     /// <summary>
-    /// Determines whether a product can currently be purchased
+    /// Determines whether a product can be purchased from a catalog state perspective
     /// </summary>
-    protected static bool IsAvailableForSale(Product product)
+    protected static bool IsCatalogPurchasable(Product product)
     {
         return product is { Published: true, Deleted: false, DisableBuyButton: false };
+    }
+
+    protected const string AvailabilityInStock = "in-stock";
+    protected const string AvailabilityLowStock = "low-stock";
+    protected const string AvailabilityOutOfStock = "out-of-stock";
+    protected const string AvailabilityBackorder = "backorder";
+
+    public static bool IsSellableStatus(string status)
+    {
+        return status == AvailabilityInStock || status == AvailabilityLowStock || status == AvailabilityBackorder;
+    }
+
+    protected static string GetSimpleAvailabilityStatus(Product product)
+    {
+        if (!IsCatalogPurchasable(product))
+            return AvailabilityOutOfStock;
+
+        switch (product.ManageInventoryMethod)
+        {
+            case ManageInventoryMethod.DontManageStock:
+                return AvailabilityInStock;
+            case ManageInventoryMethod.ManageStockByAttributes:
+                return AvailabilityOutOfStock;
+            case ManageInventoryMethod.ManageStock:
+                if (product.StockQuantity > 0)
+                {
+                    return product.MinStockQuantity > 0 && product.StockQuantity <= product.MinStockQuantity
+                        ? AvailabilityLowStock
+                        : AvailabilityInStock;
+                }
+
+                return product.BackorderMode == BackorderMode.NoBackorders
+                    ? AvailabilityOutOfStock
+                    : AvailabilityBackorder;
+            default:
+                return AvailabilityOutOfStock;
+        }
+    }
+
+    protected static string GetCombinationAvailabilityStatus(Product product, ProductAttributeCombination combination)
+    {
+        if (!IsCatalogPurchasable(product) || combination == null)
+            return AvailabilityOutOfStock;
+
+        if (combination.StockQuantity > 0)
+        {
+            return product.MinStockQuantity > 0 && combination.StockQuantity <= product.MinStockQuantity
+                ? AvailabilityLowStock
+                : AvailabilityInStock;
+        }
+
+        return combination.AllowOutOfStockOrders ? AvailabilityBackorder : AvailabilityOutOfStock;
+    }
+
+    protected static string AggregateProductAvailabilityStatus(IEnumerable<ProductVariantDto> variants)
+    {
+        var statuses = variants.Select(v => v.AvailabilityStatus).ToList();
+
+        if (statuses.Contains(AvailabilityInStock))
+            return AvailabilityInStock;
+
+        if (statuses.Contains(AvailabilityLowStock))
+            return AvailabilityLowStock;
+
+        if (statuses.Contains(AvailabilityBackorder))
+            return AvailabilityBackorder;
+
+        return AvailabilityOutOfStock;
+    }
+
+    public static (bool availableForSale, string availabilityStatus) GetAvailabilityForProduct(Product product)
+    {
+        var status = GetSimpleAvailabilityStatus(product);
+        return (IsSellableStatus(status), status);
+    }
+
+    public static (bool availableForSale, string availabilityStatus) GetAvailabilityForCombination(Product product, ProductAttributeCombination combination)
+    {
+        var status = GetCombinationAvailabilityStatus(product, combination);
+        return (IsSellableStatus(status), status);
     }
 
     /// <summary>
@@ -112,11 +192,19 @@ public class HeadlessApiModelFactory
             return false;
 
         var parts = variantId.Split(':');
+        if (parts.Length is < 1 or > 2)
+            return false;
+
         if (!int.TryParse(parts[0], out productId))
             return false;
 
-        if (parts.Length > 1 && int.TryParse(parts[1], out var combo))
+        if (parts.Length == 2)
+        {
+            if (!int.TryParse(parts[1], out var combo))
+                return false;
+
             combinationId = combo;
+        }
 
         return true;
     }
@@ -161,12 +249,16 @@ public class HeadlessApiModelFactory
 
         //options & variants from product attributes / combinations
         var (options, variants) = await PrepareOptionsAndVariantsAsync(product, customer, store, currency, price);
+        var productAvailabilityStatus = variants.Any()
+            ? AggregateProductAvailabilityStatus(variants)
+            : GetSimpleAvailabilityStatus(product);
 
         return new ProductDto
         {
             Id = product.Id.ToString(),
             Handle = handle,
-            AvailableForSale = IsAvailableForSale(product),
+            AvailableForSale = IsSellableStatus(productAvailabilityStatus),
+            AvailabilityStatus = productAvailabilityStatus,
             Title = product.Name,
             Description = product.ShortDescription ?? string.Empty,
             DescriptionHtml = product.FullDescription ?? string.Empty,
@@ -195,12 +287,15 @@ public class HeadlessApiModelFactory
 
         if (combinations == null || !combinations.Any())
         {
+            var (availableForSale, availabilityStatus) = GetAvailabilityForProduct(product);
+
             //a single, default variant
             variants.Add(new ProductVariantDto
             {
                 Id = EncodeVariantId(product.Id),
                 Title = "Default Title",
-                AvailableForSale = IsAvailableForSale(product),
+                AvailableForSale = availableForSale,
+                AvailabilityStatus = availabilityStatus,
                 SelectedOptions = new List<SelectedOptionDto>(),
                 Price = defaultPrice
             });
@@ -247,8 +342,7 @@ public class HeadlessApiModelFactory
             if (combination.OverriddenPrice.HasValue)
                 variantPrice = await PrepareMoneyAsync(combination.OverriddenPrice.Value, currency);
 
-            var variantAvailable = IsAvailableForSale(product) &&
-                (combination.AllowOutOfStockOrders || combination.StockQuantity > 0);
+            var (variantAvailable, variantAvailabilityStatus) = GetAvailabilityForCombination(product, combination);
 
             variants.Add(new ProductVariantDto
             {
@@ -257,6 +351,7 @@ public class HeadlessApiModelFactory
                     ? string.Join(" / ", selectedOptions.Select(o => o.Value))
                     : "Default Title",
                 AvailableForSale = variantAvailable,
+                AvailabilityStatus = variantAvailabilityStatus,
                 SelectedOptions = selectedOptions,
                 Price = variantPrice
             });

@@ -26,6 +26,11 @@ public static class HeadlessApiDefaults
     public const string TokenHeaderName = "X-Nop-Cart-Token";
 
     /// <summary>
+    /// Gets the request correlation header shared between storefront and backend
+    /// </summary>
+    public const string RequestIdHeaderName = "X-Nop-Request-Id";
+
+    /// <summary>
     /// Gets the name of the HTTP header sent with revalidation webhooks to identify the affected entity type
     /// </summary>
     public const string WebhookTopicHeaderName = "x-nop-topic";

@@ -42,6 +42,7 @@ public class ProductVariantDto
     public string Id { get; set; }
     public string Title { get; set; }
     public bool AvailableForSale { get; set; }
+    public string AvailabilityStatus { get; set; }
     public List<SelectedOptionDto> SelectedOptions { get; set; } = new();
     public MoneyDto Price { get; set; } = new();
 }
@@ -57,6 +58,7 @@ public class ProductDto
     public string Id { get; set; }
     public string Handle { get; set; }
     public bool AvailableForSale { get; set; }
+    public string AvailabilityStatus { get; set; }
     public string Title { get; set; }
     public string Description { get; set; }
     public string DescriptionHtml { get; set; }

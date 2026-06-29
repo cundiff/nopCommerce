@@ -4,6 +4,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Nop.Core.Infrastructure;
 using Nop.Plugin.Misc.HeadlessApi.Services;
+using Nop.Services.Configuration;
+using Nop.Services.Logging;
 
 namespace Nop.Plugin.Misc.HeadlessApi.Infrastructure;
 
@@ -12,6 +14,20 @@ namespace Nop.Plugin.Misc.HeadlessApi.Infrastructure;
 /// </summary>
 public class NopStartup : INopStartup
 {
+    private static async Task LogRequestAsync(ILogger logger, HttpContext context, double duration, string requestId, Exception exception = null)
+    {
+        if (logger == null)
+            return;
+
+        var message =
+            $"Headless API request {context.Request.Method} {context.Request.Path} -> {context.Response.StatusCode} in {duration:0.##}ms ({requestId})";
+
+        if (exception != null || context.Response.StatusCode >= StatusCodes.Status500InternalServerError)
+            await logger.ErrorAsync(message, exception);
+        else
+            await logger.InformationAsync(message);
+    }
+
     /// <summary>
     /// Add and configure any of the middleware
     /// </summary>
@@ -39,7 +55,25 @@ public class NopStartup : INopStartup
                 return;
             }
 
-            var settings = context.RequestServices.GetService<HeadlessApiSettings>();
+            var logger = context.RequestServices.GetService<ILogger>();
+            var requestId = context.Request.Headers.TryGetValue(HeadlessApiDefaults.RequestIdHeaderName, out var requestIdHeader) &&
+                            !string.IsNullOrWhiteSpace(requestIdHeader)
+                ? requestIdHeader.ToString()
+                : context.TraceIdentifier;
+            var started = System.Diagnostics.Stopwatch.StartNew();
+
+            context.Response.OnStarting(() =>
+            {
+                var duration = started.Elapsed.TotalMilliseconds;
+                context.Response.Headers[HeadlessApiDefaults.RequestIdHeaderName] = requestId;
+                context.Response.Headers["Server-Timing"] = $"nop;dur={duration:0.##}";
+                return Task.CompletedTask;
+            });
+
+            var settingService = context.RequestServices.GetService<ISettingService>();
+            var settings = settingService != null
+                ? await settingService.LoadSettingAsync<HeadlessApiSettings>()
+                : null;
             var allowed = settings?.AllowedOrigins ?? "*";
             var origin = context.Request.Headers["Origin"].ToString();
 
@@ -60,15 +94,34 @@ public class NopStartup : INopStartup
 
             context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS";
             context.Response.Headers["Access-Control-Allow-Headers"] =
-                $"Content-Type, Authorization, {HeadlessApiDefaults.TokenHeaderName}";
+                $"Content-Type, Authorization, {HeadlessApiDefaults.TokenHeaderName}, {HeadlessApiDefaults.RequestIdHeaderName}";
+            context.Response.Headers["Access-Control-Expose-Headers"] =
+                $"{HeadlessApiDefaults.RequestIdHeaderName}, Server-Timing";
 
             if (HttpMethods.IsOptions(context.Request.Method))
             {
                 context.Response.StatusCode = StatusCodes.Status204NoContent;
+                started.Stop();
+                var preflightDuration = started.Elapsed.TotalMilliseconds;
+                await LogRequestAsync(logger, context, preflightDuration, requestId);
                 return;
             }
 
-            await next();
+            try
+            {
+                await next();
+            }
+            catch (Exception ex)
+            {
+                started.Stop();
+                var failedDuration = started.Elapsed.TotalMilliseconds;
+                await LogRequestAsync(logger, context, failedDuration, requestId, ex);
+                throw;
+            }
+
+            started.Stop();
+            var duration = started.Elapsed.TotalMilliseconds;
+            await LogRequestAsync(logger, context, duration, requestId);
         });
     }
 
