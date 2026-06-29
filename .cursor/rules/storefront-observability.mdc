@@ -1,0 +1,18 @@
+---
+description: Preserve safe request correlation and diagnostics for storefront API work
+globs:
+  - "src/Plugins/Nop.Plugin.Misc.HeadlessApi/**/*.cs"
+alwaysApply: false
+---
+
+# Storefront observability
+
+For changes that affect the nopCommerce storefront API or Commerce provider:
+
+- Preserve or add request correlation with `X-Nop-Request-Id`.
+- Do not log secrets, cart tokens, authorization headers, cookies, request bodies, or full webhook URLs with secrets.
+- Backend logs intended for nopCommerce operators should use `Nop.Services.Logging.ILogger`.
+- Include method, path, status, duration, and request ID in request logs.
+- Expose backend timing with `Server-Timing` when practical.
+- Use `Response.OnStarting` for response headers that depend on final request timing.
+- Frontend provider logs should be gated behind an environment flag unless logging errors.

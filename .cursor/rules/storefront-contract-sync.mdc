@@ -1,0 +1,18 @@
+---
+description: Keep nopCommerce Headless API DTOs aligned with Commerce provider types
+alwaysApply: true
+---
+
+# Storefront contract sync
+
+The nopCommerce Headless API DTOs and Commerce provider types are one shared contract.
+
+When changing product, collection, cart, page, menu, image, money, SEO, or availability fields:
+
+- Update both sides of the contract.
+- Backend source: `nopcommerce/src/Plugins/Nop.Plugin.Misc.HeadlessApi/Models/Dtos.cs`.
+- Frontend source: `commerce/lib/types.ts`.
+- Update backend mapping code in `HeadlessApiModelFactory` when backend fields change.
+- Update provider and UI code in `commerce/lib/nopcommerce` and dependent components when frontend fields change.
+- Do not add backend DTO fields without deciding whether Commerce should type and render them.
+- Run frontend typecheck and build after contract changes.

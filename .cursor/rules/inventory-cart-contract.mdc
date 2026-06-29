@@ -1,0 +1,17 @@
+---
+description: Keep Headless API inventory availability and cart behavior consistent
+globs:
+  - "src/Plugins/Nop.Plugin.Misc.HeadlessApi/**/*.cs"
+alwaysApply: false
+---
+
+# Inventory and cart contract
+
+When changing product availability or cart behavior in the Headless API plugin:
+
+- Availability must account for `Published`, `Deleted`, `DisableBuyButton`, `ManageInventoryMethod`, `StockQuantity`, `MinStockQuantity`, `BackorderMode`, and attribute-combination stock.
+- Keep `availableForSale` and `availabilityStatus` consistent.
+- Simple products and attribute combinations must follow the same availability rules.
+- Cart add endpoints should reject invalid or unavailable merchandise with a useful HTTP error.
+- Do not silently skip invalid cart lines unless the user explicitly wants partial success behavior.
+- Keep backend availability semantics aligned with Commerce `lib/types.ts` and Add to Cart behavior.

@@ -1,0 +1,25 @@
+---
+description: nopCommerce Headless API plugin conventions and safe extension points
+globs:
+  - "src/Plugins/Nop.Plugin.Misc.HeadlessApi/**/*.cs"
+  - "src/Plugins/Nop.Plugin.Misc.HeadlessApi/**/*.cshtml"
+  - "src/Plugins/Nop.Plugin.Misc.HeadlessApi/plugin.json"
+alwaysApply: false
+---
+
+# Headless API plugin
+
+The storefront integration lives under:
+
+`src/Plugins/Nop.Plugin.Misc.HeadlessApi`
+
+When changing this plugin:
+
+- Keep API routes under `HeadlessApiDefaults.ApiRoutePrefix`.
+- Serialize storefront DTOs as camelCase JSON.
+- Load persisted plugin settings through `ISettingService` unless the setting type is registered in DI.
+- Use nopCommerce services and conventions before adding custom infrastructure.
+- Use `Nop.Services.Logging.ILogger` for logs that should appear in nopCommerce logs.
+- Do not log cart tokens, authorization headers, cookies, request bodies, or secrets.
+- Keep admin configuration changes paired with locale resources and the configure view.
+- Keep route names and constants in `HeadlessApiDefaults`.

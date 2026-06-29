@@ -1,0 +1,18 @@
+---
+description: Keep multi-repo nopCommerce plus Commerce work isolated and reviewable
+alwaysApply: true
+---
+
+# Cross-repo branch safety
+
+This repo is often paired with `commerce` for storefront integration work.
+
+When working with paired `nopcommerce` and `commerce` changes:
+
+- Never edit directly on the original experiment branch unless the user explicitly asks.
+- Create or use an isolated `cursor/*` branch before running broad agent workflows.
+- Before editing, run `git status --short --branch` in both repos.
+- Stop if either repo has unexpected dirty changes.
+- Do not reset, rebase, merge, or force-push unless explicitly requested.
+- If using `lg-tests` or another multi-repo agent, tell it which repos and branches are allowed.
+- Keep generated agent work in reviewable commits and PRs against the branch that owns the integration.
