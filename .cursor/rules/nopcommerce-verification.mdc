@@ -1,0 +1,21 @@
+---
+description: Verification expectations for nopCommerce and Headless API plugin changes
+alwaysApply: true
+---
+
+# nopCommerce verification
+
+This repository may target a .NET SDK that is not installed on the host.
+
+Preferred verification order:
+
+1. If `dotnet` is available, build the Headless API plugin or the relevant solution target.
+2. If `dotnet` is unavailable, report that clearly and run `git diff --check`.
+3. For local runtime checks, prefer the repo skill `start-local-nopcommerce`, which builds and runs the app in Docker.
+4. Do not claim backend compilation passed unless a `dotnet build` or Docker build completed successfully.
+5. If verification is blocked by environment setup, state the missing tool or service and the remaining risk.
+
+Useful context:
+
+- The local skill `start-local-nopcommerce` prefers Docker because the host may not have the required .NET SDK.
+- On Apple Silicon, use `linux/amd64` for the local Docker workflow unless intentionally debugging architecture-specific behavior.
