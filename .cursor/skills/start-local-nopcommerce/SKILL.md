@@ -36,7 +36,7 @@ docker rm nopcommerce-local
 4. Start the server in the background:
 
 ```bash
-docker run --platform linux/amd64 --name nopcommerce-local -p 8080:80 nopcommerce-local-amd64
+docker run -d --platform linux/amd64 --name nopcommerce-local -p 8080:80 nopcommerce-local-amd64
 ```
 
 5. Verify it responds:
@@ -52,10 +52,7 @@ Expected results:
 
 6. Open the app in the Cursor browser:
 
-Use the `cursor-ide-browser` MCP server. Before calling MCP tools, read the relevant tool descriptors. Then:
-- List tabs with `browser_tabs`.
-- Navigate to `http://localhost:8080/install` with `browser_navigate`.
-- Take a `browser_snapshot` to confirm the page loaded.
+Use Cursor browser automation (or whichever browser MCP tools are available in the environment). Navigate to `http://localhost:8080/install` and confirm the installer page loads.
 
 ## Notes
 
