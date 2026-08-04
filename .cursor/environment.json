@@ -1,0 +1,11 @@
+{
+  "name": "nopCommerce",
+  "install": "bash .cursor/install.sh",
+  "start": "sudo service postgresql start || sudo pg_ctlcluster 16 main start || true",
+  "ports": [
+    {
+      "name": "web",
+      "port": 5000
+    }
+  ]
+}
