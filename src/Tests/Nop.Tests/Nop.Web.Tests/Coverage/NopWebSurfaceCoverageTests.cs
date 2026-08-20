@@ -1022,12 +1022,14 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         var taxSettings = GetService<TaxSettings>();
         var shoppingCartSettings = GetService<ShoppingCartSettings>();
         var orderSettings = GetService<OrderSettings>();
+        var vendorSettings = GetService<global::Nop.Core.Domain.Vendors.VendorSettings>();
 
         var customerSnap = Snapshot(customerSettings);
         var catalogSnap = Snapshot(catalogSettings);
         var taxSnap = Snapshot(taxSettings);
         var cartSnap = Snapshot(shoppingCartSettings);
         var orderSnap = Snapshot(orderSettings);
+        var vendorSnap = Snapshot(vendorSettings);
 
         customerSettings.GenderEnabled = true;
         customerSettings.FirstNameEnabled = true;
@@ -1049,8 +1051,19 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         customerSettings.UsernamesEnabled = true;
         catalogSettings.ProductReviewsMustBeApproved = true;
         catalogSettings.ShowProductReviewsPerStore = true;
+        catalogSettings.AllowProductViewModeChanging = false;
+        catalogSettings.CategoryBreadcrumbEnabled = false;
+        catalogSettings.ShowProductsFromSubcategories = true;
+        catalogSettings.ShowCategoryProductNumber = true;
+        catalogSettings.ShowCategoryProductNumberIncludingSubcategories = true;
+        catalogSettings.NumberOfProductTags = 20;
         taxSettings.EuVatEnabled = true;
         shoppingCartSettings.MoveItemsFromWishlistToCart = true;
+        shoppingCartSettings.AllowMultipleWishlist = true;
+        shoppingCartSettings.MaximumNumberOfCustomWishlist = 5;
+        shoppingCartSettings.DisplayWishlistAfterAddingProduct = false;
+        vendorSettings.VendorsBlockItemsToDisplay = 1;
+        vendorSettings.AllowSearchByVendor = true;
         orderSettings.OnePageCheckoutEnabled = false;
         orderSettings.DisableOrderCompletedPage = false;
         orderSettings.AutoUpdateOrderTotalsOnEditingOrder = false;
@@ -1059,6 +1072,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         await settingService.SaveSettingAsync(taxSettings);
         await settingService.SaveSettingAsync(shoppingCartSettings);
         await settingService.SaveSettingAsync(orderSettings);
+        await settingService.SaveSettingAsync(vendorSettings);
 
         try
         {
@@ -1297,9 +1311,37 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             });
 
             var catalogFactory = GetService<global::Nop.Web.Factories.ICatalogModelFactory>();
-            var command = new global::Nop.Web.Models.Catalog.CatalogProductsCommand();
+            var command = new global::Nop.Web.Models.Catalog.CatalogProductsCommand { ViewMode = "list" };
             foreach (var storeVendor in (await GetService<IVendorService>().GetAllVendorsAsync()).Take(5))
                 await Try(async () => (await catalogFactory.PrepareVendorModelAsync(storeVendor, command)).Should().NotBeNull());
+            await Try(async () => (await catalogFactory.PrepareVendorNavigationModelAsync()).Should().NotBeNull());
+            await Try(async () => (await catalogFactory.PrepareSearchModelAsync(new global::Nop.Web.Models.Catalog.SearchModel(), command)).Should().NotBeNull());
+            await Try(async () => (await catalogFactory.PreparePopularProductTagsModelAsync(catalogSettings.NumberOfProductTags)).Should().NotBeNull());
+            var firstCategory = (await GetService<ICategoryService>().GetAllCategoriesAsync()).FirstOrDefault();
+            if (firstCategory != null)
+                await Try(async () => (await catalogFactory.PrepareCategoryModelAsync(firstCategory, command)).Should().NotBeNull());
+            await Try(async () =>
+            {
+                var viewModes = new global::Nop.Web.Models.Catalog.CatalogProductsModel();
+                await catalogFactory.PrepareViewModesAsync(viewModes, command);
+            });
+
+            var customWishlistService = GetService<ICustomWishlistService>();
+            await Try(async () =>
+            {
+                await customWishlistService.AddCustomWishlistAsync(new CustomWishlist
+                {
+                    Name = "Coverage wishlist",
+                    CustomerId = customer.Id,
+                    CreatedOnUtc = DateTime.UtcNow
+                });
+                var wishlistItem = (await GetService<IProductService>().SearchProductsAsync(pageSize: 5)).First();
+                await shoppingCart.AddProductToCart_Catalog(wishlistItem.Id, (int)ShoppingCartType.Wishlist, 1);
+                await shoppingCart.AddProductToCart_Details(wishlistItem.Id, (int)ShoppingCartType.Wishlist, harness.CreateForm(new Dictionary<string, string>
+                {
+                    [$"addtocart_{wishlistItem.Id}.EnteredQuantity"] = "1"
+                }));
+            });
 
             var pluginController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.PluginController>();
             var pluginFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IPluginModelFactory>();
@@ -1357,11 +1399,13 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             Restore(taxSettings, taxSnap);
             Restore(shoppingCartSettings, cartSnap);
             Restore(orderSettings, orderSnap);
+            Restore(vendorSettings, vendorSnap);
             await settingService.SaveSettingAsync(customerSettings);
             await settingService.SaveSettingAsync(catalogSettings);
             await settingService.SaveSettingAsync(taxSettings);
             await settingService.SaveSettingAsync(shoppingCartSettings);
             await settingService.SaveSettingAsync(orderSettings);
+            await settingService.SaveSettingAsync(vendorSettings);
             var restored = await GetService<ICustomerService>().GetCustomerByEmailAsync(NopTestsDefaults.AdminEmail);
             if (restored != null)
                 await GetService<IWorkContext>().SetCurrentCustomerAsync(restored);
