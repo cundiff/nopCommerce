@@ -32,6 +32,7 @@ using Nop.Services.Orders;
 using Nop.Services.Stores;
 using Nop.Web.Framework;
 using Nop.Web.Framework.Models;
+using Nop.Web.Framework.Mvc.Razor;
 
 namespace Nop.Tests.Nop.Web.Tests.Coverage;
 
@@ -50,8 +51,18 @@ public sealed class WebCoverageHarness
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddOptions();
-        services.AddMvc();
-        return services.BuildServiceProvider();
+        services.AddDataProtection();
+        services.AddAntiforgery();
+        services.AddRouting();
+        var diagnostic = new System.Diagnostics.DiagnosticListener("Microsoft.AspNetCore");
+        services.AddSingleton<System.Diagnostics.DiagnosticSource>(diagnostic);
+        services.AddSingleton(diagnostic);
+        services.AddControllersWithViews()
+            .AddApplicationPart(typeof(global::Nop.Web.Controllers.HomeController).Assembly)
+            .AddApplicationPart(typeof(NopRazorPage<>).Assembly);
+        var provider = services.BuildServiceProvider();
+        _ = provider.GetRequiredService<Microsoft.AspNetCore.Mvc.ViewFeatures.IHtmlGenerator>();
+        return provider;
     }
 
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(45);
@@ -511,6 +522,8 @@ public sealed class WebCoverageHarness
     {
         foreach (var type in types)
         {
+            IServiceProvider previousServices = null;
+            HttpContext http = null;
             try
             {
                 var instance = Activator.CreateInstance(type);
@@ -519,61 +532,60 @@ public sealed class WebCoverageHarness
 
                 TypesCreated++;
 
-                var http = _services.GetRequiredService<IHttpContextAccessor>().HttpContext
-                           ?? throw new InvalidOperationException("HttpContext is not available");
-                var previousServices = http.RequestServices;
+                http = _services.GetRequiredService<IHttpContextAccessor>().HttpContext
+                       ?? throw new InvalidOperationException("HttpContext is not available");
+                previousServices = http.RequestServices;
                 http.RequestServices = new CompositeServiceProvider(MvcServices.Value, _services);
-                try
+
+                AttachMvc(instance);
+                FillRazorModelGraph(instance);
+
+                if (instance is RazorPageBase razorPage)
                 {
-                    AttachMvc(instance);
-                    FillRazorModelGraph(instance);
-
-                    if (instance is RazorPageBase razorPage)
-                    {
-                        razorPage.Layout = null;
-                        razorPage.HtmlEncoder ??= HtmlEncoder.Default;
-                        try
-                        {
-                            MvcServices.Value.GetService<IRazorPageActivator>()
-                                ?.Activate(razorPage, razorPage.ViewContext);
-                        }
-                        catch
-                        {
-                            // continue with manually attached helpers
-                        }
-                    }
-
-                    var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
-                    if (execute == null)
-                        continue;
-
+                    razorPage.Layout = null;
+                    razorPage.HtmlEncoder ??= HtmlEncoder.Default;
                     try
                     {
-                        var raw = execute.Invoke(instance, null);
-                        if (raw is Task task)
-                        {
-                            var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(3)));
-                            if (finished != task)
-                            {
-                                MethodsFailed++;
-                                continue;
-                            }
+                        MvcServices.Value.GetService<IRazorPageActivator>()
+                            ?.Activate(razorPage, razorPage.ViewContext);
+                    }
+                    catch
+                    {
+                        // keep the helpers attached in AttachMvc
+                    }
 
-                            await task;
+                    // Real IHtmlHelper/IViewComponentHelper try to locate partials and
+                    // view components via the MVC view engine. Stub them so this page's
+                    // own ExecuteAsync can finish; compiled partials are invoked separately.
+                    ActivateRazorInjects(instance, razorPage.ViewContext);
+                }
+
+                var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
+                if (execute == null)
+                    continue;
+
+                try
+                {
+                    var raw = execute.Invoke(instance, null);
+                    if (raw is Task task)
+                    {
+                        var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(3)));
+                        if (finished != task)
+                        {
+                            MethodsFailed++;
+                            continue;
                         }
 
-                        MethodsInvoked++;
+                        await task;
                     }
-                    catch (Exception ex)
-                    {
-                        MethodsFailed++;
-                        if (Failures.Count < 40)
-                            Failures.Add($"{type.Name}: {ex.GetBaseException().GetType().Name}: {ex.GetBaseException().Message}");
-                    }
+
+                    MethodsInvoked++;
                 }
-                finally
+                catch (Exception ex)
                 {
-                    http.RequestServices = previousServices;
+                    MethodsFailed++;
+                    if (Failures.Count < 40)
+                        Failures.Add($"{type.Name}: {ex.GetBaseException().GetType().Name}: {ex.GetBaseException().Message}");
                 }
             }
             catch (Exception ex)
@@ -581,6 +593,11 @@ public sealed class WebCoverageHarness
                 MethodsFailed++;
                 if (Failures.Count < 80)
                     Failures.Add($"{type.Name}: {ex.GetBaseException().Message}");
+            }
+            finally
+            {
+                if (http != null && previousServices != null)
+                    http.RequestServices = previousServices;
             }
         }
     }
@@ -708,6 +725,8 @@ public sealed class WebCoverageHarness
             http.RequestServices = _services;
 
         var routeData = http.GetRouteData() ?? new RouteData();
+        if (routeData.Routers.Count == 0)
+            routeData.Routers.Add(DummyRouter.Instance);
         var actionContext = new ActionContext(http, routeData, new ControllerActionDescriptor());
         var url = _services.GetRequiredService<IUrlHelperFactory>().GetUrlHelper(actionContext);
         var tempData = _services.GetRequiredService<ITempDataDictionaryFactory>().GetTempData(http);
@@ -722,18 +741,7 @@ public sealed class WebCoverageHarness
             }
         }
 
-        var viewData = new ViewDataDictionary(new EmptyModelMetadataProvider(), new ModelStateDictionary());
-        if (modelType != null)
-        {
-            try
-            {
-                viewData.Model = CreateArg(modelType, "Model", instance.GetType());
-            }
-            catch
-            {
-                // compiled views still execute as far as they can with an empty model
-            }
-        }
+        var viewData = CreateViewData(modelType, instance.GetType());
 
         var viewContext = new ViewContext(
             actionContext,
@@ -765,6 +773,42 @@ public sealed class WebCoverageHarness
             razorPage.Layout = null;
             razorPage.HtmlEncoder ??= HtmlEncoder.Default;
             ActivateRazorInjects(instance, viewContext);
+        }
+    }
+
+    private ViewDataDictionary CreateViewData(Type modelType, Type ownerType)
+    {
+        object model = null;
+        if (modelType != null)
+        {
+            try
+            {
+                model = CreateArg(modelType, "Model", ownerType);
+            }
+            catch
+            {
+                model = CreateDefault(modelType);
+            }
+        }
+
+        if (modelType == null)
+            return new ViewDataDictionary(new EmptyModelMetadataProvider(), new ModelStateDictionary());
+
+        try
+        {
+            var typedType = typeof(ViewDataDictionary<>).MakeGenericType(modelType);
+            var typed = (ViewDataDictionary)Activator.CreateInstance(typedType, new EmptyModelMetadataProvider(), new ModelStateDictionary());
+            if (model != null && modelType.IsInstanceOfType(model))
+                typed.Model = model;
+            return typed;
+        }
+        catch
+        {
+            var viewData = new ViewDataDictionary(new EmptyModelMetadataProvider(), new ModelStateDictionary())
+            {
+                Model = model
+            };
+            return viewData;
         }
     }
 
@@ -881,12 +925,39 @@ public sealed class WebCoverageHarness
 
                     FillGraph(current, depth + 1);
                 }
-                else if (current is IEnumerable enumerable && current is not string)
+                else if (prop.PropertyType.IsGenericType)
                 {
-                    foreach (var item in enumerable)
+                    var def = prop.PropertyType.GetGenericTypeDefinition();
+                    if (def == typeof(IList<>) || def == typeof(List<>) || def == typeof(ICollection<>)
+                        || def == typeof(IEnumerable<>) || def == typeof(IReadOnlyList<>))
                     {
-                        FillGraph(item, depth + 1);
-                        break;
+                        var itemType = prop.PropertyType.GetGenericArguments()[0];
+                        if (current == null)
+                        {
+                            var listType = typeof(List<>).MakeGenericType(itemType);
+                            var list = (IList)Activator.CreateInstance(listType);
+                            if (itemType == typeof(string))
+                                list.Add("item");
+                            else if (!itemType.IsPrimitive)
+                            {
+                                var item = CreateDefault(itemType);
+                                if (item != null)
+                                {
+                                    list.Add(item);
+                                    FillGraph(item, depth + 1);
+                                }
+                            }
+
+                            prop.SetValue(model, list);
+                        }
+                        else
+                        {
+                            foreach (var item in (IEnumerable)current)
+                            {
+                                FillGraph(item, depth + 1);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1327,6 +1398,13 @@ public sealed class WebCoverageHarness
         }
     }
 
+    private sealed class DummyRouter : IRouter
+    {
+        public static readonly DummyRouter Instance = new();
+        public VirtualPathData GetVirtualPath(VirtualPathContext context) => new(this, "/coverage");
+        public Task RouteAsync(RouteContext context) => Task.CompletedTask;
+    }
+
     private sealed class CompositeServiceProvider : IServiceProvider
     {
         private readonly IServiceProvider[] _providers;
@@ -1340,16 +1418,9 @@ public sealed class WebCoverageHarness
         {
             foreach (var provider in _providers)
             {
-                try
-                {
-                    var service = provider.GetService(serviceType);
-                    if (service != null)
-                        return service;
-                }
-                catch
-                {
-                    // try the next provider
-                }
+                var service = provider.GetService(serviceType);
+                if (service != null)
+                    return service;
             }
 
             return null;
