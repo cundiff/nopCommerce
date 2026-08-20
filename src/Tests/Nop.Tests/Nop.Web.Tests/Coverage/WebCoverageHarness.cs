@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Reflection;
+using Microsoft.AspNetCore.Html;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Abstractions;
@@ -576,6 +577,27 @@ public sealed class WebCoverageHarness
         if (instance is RazorPageBase razorPage)
         {
             razorPage.ViewContext = viewContext;
+            razorPage.Layout = null;
+
+            foreach (var prop in instance.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (prop.GetIndexParameters().Length != 0)
+                    continue;
+                if (prop.Name is not ("Html" or "Url" or "Component" or "Json" or "DiagnosticSource"))
+                    continue;
+                if (!prop.PropertyType.IsInterface)
+                    continue;
+
+                try
+                {
+                    var setter = prop.GetSetMethod(true);
+                    setter?.Invoke(instance, [EmptyProxy.Create(prop.PropertyType)]);
+                }
+                catch
+                {
+                    // optional injects
+                }
+            }
         }
     }
 
@@ -588,7 +610,6 @@ public sealed class WebCoverageHarness
                || name.Contains("GenerateAll", StringComparison.OrdinalIgnoreCase)
                || name.Contains("Rss", StringComparison.OrdinalIgnoreCase)
                || name.Contains("Restart", StringComparison.OrdinalIgnoreCase)
-               || name.Contains("Sitemap", StringComparison.OrdinalIgnoreCase)
                || name.Contains("ConfirmOrder", StringComparison.OrdinalIgnoreCase)
                || name.Equals("OpcConfirmOrder", StringComparison.Ordinal)
                || name.Contains("ChangeEncryptionKey", StringComparison.OrdinalIgnoreCase)
@@ -929,6 +950,52 @@ public sealed class WebCoverageHarness
         catch
         {
             return (false, null);
+        }
+    }
+
+    public class EmptyProxy : DispatchProxy
+    {
+        public static object Create(Type interfaceType)
+        {
+            var proxyType = typeof(DispatchProxy);
+            var create = proxyType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .First(m => m.Name == nameof(DispatchProxy.Create) && m.GetGenericArguments().Length == 2);
+            return create.MakeGenericMethod(interfaceType, typeof(EmptyProxy)).Invoke(null, null);
+        }
+
+        protected override object Invoke(MethodInfo targetMethod, object[] args)
+        {
+            if (targetMethod == null)
+                return null;
+
+            var returnType = targetMethod.ReturnType;
+            if (returnType == typeof(void))
+                return null;
+            if (returnType == typeof(Task))
+                return Task.CompletedTask;
+            if (returnType == typeof(string))
+                return string.Empty;
+            if (typeof(IHtmlContent).IsAssignableFrom(returnType))
+                return HtmlString.Empty;
+            if (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(Task<>))
+            {
+                var inner = returnType.GetGenericArguments()[0];
+                var value = DefaultValue(inner);
+                return typeof(Task).GetMethod(nameof(Task.FromResult))!.MakeGenericMethod(inner).Invoke(null, [value]);
+            }
+
+            return DefaultValue(returnType);
+        }
+
+        private static object DefaultValue(Type type)
+        {
+            if (type == typeof(string))
+                return string.Empty;
+            if (typeof(IHtmlContent).IsAssignableFrom(type))
+                return HtmlString.Empty;
+            if (type.IsValueType)
+                return Activator.CreateInstance(type);
+            return null;
         }
     }
 

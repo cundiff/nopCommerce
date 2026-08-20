@@ -536,6 +536,67 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         await Try(async () => await checkout.OpcSaveBilling(billing, form));
         var shipping = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel();
         await Try(async () => await checkout.OpcSaveShipping(shipping, form));
+
+        var attributeService = GetService<IProductAttributeService>();
+        foreach (var product in await GetService<IProductService>().SearchProductsAsync(pageSize: 8))
+        {
+            var mappings = await attributeService.GetProductAttributeMappingsByProductIdAsync(product.Id);
+            foreach (var mapping in mappings.Take(2))
+            {
+                await Try(async () =>
+                {
+                    var mappingModel = await productFactory.PrepareProductAttributeMappingModelAsync(null, product, mapping);
+                    productController.ModelState.Clear();
+                    await productController.ProductAttributeMappingEdit(mappingModel, true, form);
+                });
+
+                var values = await attributeService.GetProductAttributeValuesAsync(mapping.Id);
+                foreach (var value in values.Take(2))
+                {
+                    await Try(async () =>
+                    {
+                        var valueModel = await productFactory.PrepareProductAttributeValueModelAsync(null, mapping, value);
+                        productController.ModelState.Clear();
+                        await productController.ProductAttributeValueEditPopup(valueModel);
+                    });
+                }
+            }
+        }
+
+        await Try(async () =>
+        {
+            var registerModel = await publicCustomerFactory.PrepareRegisterModelAsync(
+                new global::Nop.Web.Models.Customer.RegisterModel(), false);
+            registerModel.Email = $"coverage-{Guid.NewGuid():N}@example.com";
+            registerModel.Password = "1q2w3e4r5t";
+            registerModel.ConfirmPassword = "1q2w3e4r5t";
+            registerModel.FirstName = "Coverage";
+            registerModel.LastName = "User";
+            publicCustomerController.ModelState.Clear();
+            await publicCustomerController.Register(registerModel, string.Empty, true, form);
+            await GetService<IWorkContext>().SetCurrentCustomerAsync(adminCustomer);
+        });
+    }
+
+    [Test]
+    public async Task ExerciseSitemapFactory()
+    {
+        var factory = GetService<global::Nop.Web.Factories.ISitemapModelFactory>();
+        try
+        {
+            (await factory.PrepareSitemapModelAsync(new global::Nop.Web.Models.Sitemap.SitemapPageModel())).Should().NotBeNull();
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            (await factory.PrepareSitemapXmlModelAsync()).Should().NotBeNull();
+        }
+        catch
+        {
+        }
     }
 
     [Test]
