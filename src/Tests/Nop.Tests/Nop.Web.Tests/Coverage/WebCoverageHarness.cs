@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Html;
 using Microsoft.AspNetCore.Http;
@@ -32,6 +33,7 @@ using Nop.Services.Orders;
 using Nop.Services.Stores;
 using Nop.Web.Framework;
 using Nop.Web.Framework.Models;
+using Nop.Web.Framework.Models.DataTables;
 using Nop.Web.Framework.Mvc.Razor;
 
 namespace Nop.Tests.Nop.Web.Tests.Coverage;
@@ -60,8 +62,12 @@ public sealed class WebCoverageHarness
         services.AddControllersWithViews()
             .AddApplicationPart(typeof(global::Nop.Web.Controllers.HomeController).Assembly)
             .AddApplicationPart(typeof(NopRazorPage<>).Assembly);
+        // Real IHtmlGenerator/IHtmlHelper throw on missing routes and editor templates.
+        // Stub them so compiled views can run past the first asp-/nop- tag helper.
+        services.AddSingleton<IHtmlGenerator, CoverageHtmlGenerator>();
+        services.AddTransient(typeof(IHtmlHelper), _ => EmptyProxy.Create(typeof(IHtmlHelper)));
         var provider = services.BuildServiceProvider();
-        _ = provider.GetRequiredService<Microsoft.AspNetCore.Mvc.ViewFeatures.IHtmlGenerator>();
+        _ = provider.GetRequiredService<IHtmlGenerator>();
         return provider;
     }
 
@@ -191,6 +197,65 @@ public sealed class WebCoverageHarness
             }
         }
     }
+
+    public async Task SeedWishlistAsync()
+    {
+        var workContext = _services.GetRequiredService<IWorkContext>();
+        var customer = await workContext.GetCurrentCustomerAsync();
+        var store = await _services.GetRequiredService<IStoreContext>().GetCurrentStoreAsync();
+        var cartService = _services.GetRequiredService<IShoppingCartService>();
+        var products = await _services.GetRequiredService<IProductService>().SearchProductsAsync(pageSize: 20);
+
+        foreach (var product in products)
+        {
+            try
+            {
+                await cartService.AddToCartAsync(customer, product, ShoppingCartType.Wishlist, store.Id,
+                    quantity: 1, addRequiredProducts: false);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    public void ClearWorkContextCaches()
+    {
+        if (_services.GetService<IWorkContext>() is not WebWorkContext workContext)
+            return;
+
+        var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        typeof(WebWorkContext).GetField("_cachedVendor", flags)?.SetValue(workContext, null);
+        typeof(WebWorkContext).GetField("_cachedLanguage", flags)?.SetValue(workContext, null);
+        typeof(WebWorkContext).GetField("_cachedCurrency", flags)?.SetValue(workContext, null);
+        typeof(WebWorkContext).GetField("_cachedTaxDisplayType", flags)?.SetValue(workContext, null);
+    }
+
+    public FormCollection CreateForm(IDictionary<string, string> values = null, bool withFile = false)
+    {
+        var fields = new Dictionary<string, StringValues>(StringComparer.OrdinalIgnoreCase);
+        var addressId = GetEntityIds("Address").FirstOrDefault();
+        if (addressId > 0)
+        {
+            fields["billing_address_id"] = addressId.ToString();
+            fields["shipping_address_id"] = addressId.ToString();
+        }
+
+        if (values != null)
+        {
+            foreach (var pair in values)
+                fields[pair.Key] = pair.Value;
+        }
+
+        var files = new FormFileCollection();
+        if (withFile)
+            files.Add(CreateFormFile());
+
+        return new FormCollection(fields, files);
+    }
+
+    public static IFormFile CreateFormFile(string name = "file", string fileName = "coverage.jpg")
+        => new CoverageFormFile(name, fileName, "image/jpeg", CoverageJpeg);
 
     public async Task ExerciseEditRoundTripsAsync(IEnumerable<Type> controllerTypes)
         => await ExerciseGetPostPairsAsync(controllerTypes);
@@ -895,12 +960,23 @@ public sealed class WebCoverageHarness
 
     private void FillGraph(object model, int depth)
     {
-        if (model == null || depth > 3)
+        if (model == null || depth > 5)
             return;
 
         var type = model.GetType();
-        if (type == typeof(string) || type.IsPrimitive || type.IsEnum)
+        if (ShouldSkipFill(type))
             return;
+
+        if (model is DataTablesModel tables && string.IsNullOrEmpty(tables.Name))
+            tables.Name = "coverage-grid";
+
+        if (model is DataUrl dataUrl)
+        {
+            dataUrl.ActionName ??= "List";
+            dataUrl.ControllerName ??= "Product";
+            dataUrl.Url ??= "/coverage";
+            dataUrl.RouteValues ??= new RouteValueDictionary();
+        }
 
         foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
         {
@@ -910,55 +986,106 @@ public sealed class WebCoverageHarness
             try
             {
                 var current = prop.CanRead ? prop.GetValue(model) : null;
-                if (prop.PropertyType == typeof(string) && current == null)
+                var propertyType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
+
+                if (propertyType == typeof(string) && string.IsNullOrEmpty(current as string))
                 {
-                    prop.SetValue(model, prop.Name);
+                    prop.SetValue(model, prop.Name == "Name" ? "coverage-grid" : prop.Name);
                 }
-                else if (typeof(BaseNopModel).IsAssignableFrom(prop.PropertyType))
+                else if (propertyType == typeof(bool) && current is false)
+                {
+                    prop.SetValue(model, true);
+                }
+                else if (propertyType == typeof(DataUrl) && current == null)
+                {
+                    var url = new DataUrl("/coverage", "id")
+                    {
+                        ActionName = "List",
+                        ControllerName = "Product",
+                        RouteValues = new RouteValueDictionary()
+                    };
+                    prop.SetValue(model, url);
+                }
+                else if (propertyType.IsArray)
+                {
+                    var element = propertyType.GetElementType();
+                    if (current == null || ((Array)current).Length == 0)
+                    {
+                        var array = Array.CreateInstance(element!, 1);
+                        var item = element == typeof(string) ? "item" : CreateDefault(element);
+                        if (item != null)
+                        {
+                            array.SetValue(item, 0);
+                            FillGraph(item, depth + 1);
+                        }
+                        prop.SetValue(model, array);
+                    }
+                }
+                else if (typeof(IDictionary).IsAssignableFrom(propertyType))
                 {
                     if (current == null)
                     {
-                        current = CreateDefault(prop.PropertyType);
+                        var created = CreateDefault(propertyType) ?? CreateDictionary(propertyType);
+                        if (created != null)
+                            prop.SetValue(model, created);
+                    }
+                }
+                else if (IsCollectionType(propertyType, out var itemType))
+                {
+                    IList list;
+                    if (current == null)
+                    {
+                        list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(itemType));
+                        prop.SetValue(model, list);
+                    }
+                    else if (current is IList existing)
+                    {
+                        list = existing;
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    if (list.Count == 0)
+                    {
+                        object item;
+                        if (itemType == typeof(string))
+                            item = "item";
+                        else if (itemType == typeof(SelectListItem))
+                            item = new SelectListItem("coverage", "1", true);
+                        else if (itemType.IsPrimitive || itemType.IsEnum)
+                            item = CreateArg(itemType, prop.Name, type);
+                        else
+                            item = CreateDefault(itemType);
+
+                        if (item != null)
+                        {
+                            list.Add(item);
+                            FillGraph(item, depth + 1);
+                        }
+                    }
+                    else
+                    {
+                        FillGraph(list[0], depth + 1);
+                    }
+                }
+                else if (propertyType == typeof(SelectList) && current == null)
+                {
+                    prop.SetValue(model, new SelectList(new[] { "coverage" }));
+                }
+                else if (!propertyType.IsPrimitive && !propertyType.IsEnum && propertyType != typeof(decimal)
+                         && propertyType != typeof(DateTime) && propertyType != typeof(DateTimeOffset)
+                         && propertyType != typeof(Guid) && propertyType.IsClass)
+                {
+                    if (current == null)
+                    {
+                        current = CreateDefault(propertyType);
                         if (current != null)
                             prop.SetValue(model, current);
                     }
 
                     FillGraph(current, depth + 1);
-                }
-                else if (prop.PropertyType.IsGenericType)
-                {
-                    var def = prop.PropertyType.GetGenericTypeDefinition();
-                    if (def == typeof(IList<>) || def == typeof(List<>) || def == typeof(ICollection<>)
-                        || def == typeof(IEnumerable<>) || def == typeof(IReadOnlyList<>))
-                    {
-                        var itemType = prop.PropertyType.GetGenericArguments()[0];
-                        if (current == null)
-                        {
-                            var listType = typeof(List<>).MakeGenericType(itemType);
-                            var list = (IList)Activator.CreateInstance(listType);
-                            if (itemType == typeof(string))
-                                list.Add("item");
-                            else if (!itemType.IsPrimitive)
-                            {
-                                var item = CreateDefault(itemType);
-                                if (item != null)
-                                {
-                                    list.Add(item);
-                                    FillGraph(item, depth + 1);
-                                }
-                            }
-
-                            prop.SetValue(model, list);
-                        }
-                        else
-                        {
-                            foreach (var item in (IEnumerable)current)
-                            {
-                                FillGraph(item, depth + 1);
-                                break;
-                            }
-                        }
-                    }
                 }
             }
             catch
@@ -966,6 +1093,53 @@ public sealed class WebCoverageHarness
                 // skip unreadable properties
             }
         }
+    }
+
+    private static bool IsCollectionType(Type type, out Type itemType)
+    {
+        itemType = null;
+        if (!type.IsGenericType)
+            return false;
+
+        var def = type.GetGenericTypeDefinition();
+        if (def != typeof(IList<>) && def != typeof(List<>) && def != typeof(ICollection<>)
+            && def != typeof(IEnumerable<>) && def != typeof(IReadOnlyList<>)
+            && def != typeof(IReadOnlyCollection<>))
+            return false;
+
+        itemType = type.GetGenericArguments()[0];
+        return itemType != typeof(byte);
+    }
+
+    private static object CreateDictionary(Type type)
+    {
+        try
+        {
+            if (type.IsInterface && type.IsGenericType && type.GetGenericTypeDefinition() == typeof(IDictionary<,>))
+            {
+                var args = type.GetGenericArguments();
+                return Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(args));
+            }
+
+            return Activator.CreateInstance(type);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool ShouldSkipFill(Type type)
+    {
+        if (type == typeof(string) || type.IsPrimitive || type.IsEnum || type == typeof(decimal))
+            return true;
+        if (typeof(Delegate).IsAssignableFrom(type) || type == typeof(Type) || type == typeof(Stream))
+            return true;
+        if (typeof(HttpContext).IsAssignableFrom(type) || typeof(IServiceProvider).IsAssignableFrom(type))
+            return true;
+        if (typeof(IHtmlHelper).IsAssignableFrom(type) || typeof(IUrlHelper).IsAssignableFrom(type))
+            return true;
+        return type.Namespace?.StartsWith("System.Reflection", StringComparison.Ordinal) == true;
     }
 
     private static bool ShouldSkipMethodName(string name)
@@ -1003,8 +1177,7 @@ public sealed class WebCoverageHarness
             return true;
 
         if (method.GetParameters().Any(p =>
-                typeof(IFormFile).IsAssignableFrom(p.ParameterType)
-                || p.ParameterType.IsByRef
+                p.ParameterType.IsByRef
                 || p.ParameterType == typeof(CancellationToken)))
             return true;
 
@@ -1107,18 +1280,11 @@ public sealed class WebCoverageHarness
             return CancellationToken.None;
         if (type == typeof(StringValues))
             return new StringValues("1");
-        if (type == typeof(IFormCollection) || type == typeof(FormCollection))
-        {
-            var values = new Dictionary<string, StringValues>();
-            var addressId = GetEntityIds("Address").FirstOrDefault();
-            if (addressId > 0)
-            {
-                values["billing_address_id"] = addressId.ToString();
-                values["shipping_address_id"] = addressId.ToString();
-            }
+        if (type == typeof(IFormFile) || typeof(IFormFile).IsAssignableFrom(type))
+            return CreateFormFile();
 
-            return new FormCollection(values);
-        }
+        if (type == typeof(IFormCollection) || type == typeof(FormCollection))
+            return CreateForm(withFile: true);
 
         if (type == typeof(IUrlHelper))
             return _services.GetRequiredService<IUrlHelperFactory>()
@@ -1128,7 +1294,12 @@ public sealed class WebCoverageHarness
                     new ActionDescriptor()));
 
         if (type.IsArray)
-            return Array.CreateInstance(type.GetElementType()!, 0);
+        {
+            var element = type.GetElementType()!;
+            if (element == typeof(IFormFile))
+                return new IFormFile[] { CreateFormFile() };
+            return Array.CreateInstance(element, 0);
+        }
 
         if (type.IsGenericType)
         {
@@ -1143,6 +1314,9 @@ public sealed class WebCoverageHarness
             if (def == typeof(IEnumerable<>) || def == typeof(ICollection<>) || def == typeof(IList<>) || def == typeof(List<>) || def == typeof(IReadOnlyList<>))
             {
                 var itemType = type.GetGenericArguments()[0];
+                if (itemType == typeof(IFormFile))
+                    return new List<IFormFile> { CreateFormFile() };
+
                 var listType = typeof(List<>).MakeGenericType(itemType);
                 var list = (IList)Activator.CreateInstance(listType)!;
                 if (itemType == typeof(int))
@@ -1284,9 +1458,60 @@ public sealed class WebCoverageHarness
 
     private static object CreateDefault(Type type)
     {
+        if (type == null || type == typeof(void) || type.IsAbstract)
+            return null;
+
+        if (type == typeof(DataUrl))
+            return new DataUrl("/coverage", "id") { ActionName = "List", ControllerName = "Product" };
+
+        if (type == typeof(SelectList))
+            return new SelectList(new[] { "coverage" });
+
+        if (type == typeof(SelectListItem))
+            return new SelectListItem("coverage", "1", true);
+
         try
         {
             return Activator.CreateInstance(type);
+        }
+        catch
+        {
+            // try a constructor with dummy arguments
+        }
+
+        try
+        {
+            var ctor = type.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+                .OrderBy(c => c.GetParameters().Length)
+                .FirstOrDefault();
+            if (ctor != null)
+            {
+                var args = ctor.GetParameters().Select(p =>
+                {
+                    if (p.HasDefaultValue)
+                        return p.DefaultValue;
+                    if (p.ParameterType == typeof(string))
+                        return p.Name ?? "coverage";
+                    if (p.ParameterType == typeof(bool))
+                        return true;
+                    if (p.ParameterType == typeof(int))
+                        return 1;
+                    if (p.ParameterType == typeof(RouteValueDictionary))
+                        return new RouteValueDictionary();
+                    if (p.ParameterType.IsValueType)
+                        return Activator.CreateInstance(p.ParameterType);
+                    return null;
+                }).ToArray();
+                return ctor.Invoke(args);
+            }
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            return RuntimeHelpers.GetUninitializedObject(type);
         }
         catch
         {
@@ -1386,17 +1611,137 @@ public sealed class WebCoverageHarness
         {
             if (type == typeof(string))
                 return string.Empty;
+            if (type == typeof(TagBuilder))
+                return new TagBuilder("span");
             if (typeof(IHtmlContent).IsAssignableFrom(type))
                 return HtmlString.Empty;
             if (type.IsValueType)
                 return Activator.CreateInstance(type);
             if (type.IsArray)
-                return Array.CreateInstance(type.GetElementType()!, 0);
+            {
+                var element = type.GetElementType()!;
+                if (element == typeof(IFormFile))
+                    return new IFormFile[] { CreateFormFile() };
+                return Array.CreateInstance(element, 0);
+            }
+
+            if (type.IsGenericType)
+            {
+                var def = type.GetGenericTypeDefinition();
+                if (def == typeof(IEnumerable<>) || def == typeof(ICollection<>) || def == typeof(IList<>)
+                    || def == typeof(IReadOnlyList<>) || def == typeof(List<>))
+                {
+                    return Activator.CreateInstance(typeof(List<>).MakeGenericType(type.GetGenericArguments()[0]));
+                }
+
+                if (def == typeof(IDictionary<,>) || def == typeof(Dictionary<,>))
+                {
+                    var args = type.GetGenericArguments();
+                    return Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(args));
+                }
+            }
+
             if (type.IsClass && type.GetConstructor(Type.EmptyTypes) != null)
                 return Activator.CreateInstance(type);
             return null;
         }
     }
+
+    private sealed class CoverageHtmlGenerator : IHtmlGenerator
+    {
+        public string IdAttributeDotReplacement => "_";
+        public string Encode(string value) => value ?? string.Empty;
+        public string Encode(object value) => value?.ToString() ?? string.Empty;
+        public string FormatValue(object value, string format) => value?.ToString() ?? string.Empty;
+
+        private static TagBuilder Tag(string name = "span") => new(name);
+
+        public TagBuilder GenerateActionLink(ViewContext viewContext, string linkText, string actionName, string controllerName, string protocol, string hostname, string fragment, object routeValues, object htmlAttributes)
+            => Tag("a");
+        public TagBuilder GeneratePageLink(ViewContext viewContext, string linkText, string pageName, string pageHandler, string protocol, string hostname, string fragment, object routeValues, object htmlAttributes)
+            => Tag("a");
+        public IHtmlContent GenerateAntiforgery(ViewContext viewContext) => HtmlString.Empty;
+        public TagBuilder GenerateCheckBox(ViewContext viewContext, ModelExplorer modelExplorer, string expression, bool? isChecked, object htmlAttributes)
+            => Tag("input");
+        public TagBuilder GenerateHiddenForCheckbox(ViewContext viewContext, ModelExplorer modelExplorer, string expression)
+            => Tag("input");
+        public TagBuilder GenerateForm(ViewContext viewContext, string actionName, string controllerName, object routeValues, string method, object htmlAttributes)
+            => Tag("form");
+        public TagBuilder GeneratePageForm(ViewContext viewContext, string pageName, string pageHandler, object routeValues, string fragment, string method, object htmlAttributes)
+            => Tag("form");
+        public TagBuilder GenerateRouteForm(ViewContext viewContext, string routeName, object routeValues, string method, object htmlAttributes)
+            => Tag("form");
+        public TagBuilder GenerateHidden(ViewContext viewContext, ModelExplorer modelExplorer, string expression, object value, bool useViewData, object htmlAttributes)
+            => Tag("input");
+        public TagBuilder GenerateLabel(ViewContext viewContext, ModelExplorer modelExplorer, string expression, string labelText, object htmlAttributes)
+            => Tag("label");
+        public TagBuilder GeneratePassword(ViewContext viewContext, ModelExplorer modelExplorer, string expression, object value, object htmlAttributes)
+            => Tag("input");
+        public TagBuilder GenerateRadioButton(ViewContext viewContext, ModelExplorer modelExplorer, string expression, object value, bool? isChecked, object htmlAttributes)
+            => Tag("input");
+        public TagBuilder GenerateRouteLink(ViewContext viewContext, string linkText, string routeName, string protocol, string hostName, string fragment, object routeValues, object htmlAttributes)
+            => Tag("a");
+        public TagBuilder GenerateSelect(ViewContext viewContext, ModelExplorer modelExplorer, string optionLabel, string expression, IEnumerable<SelectListItem> selectList, bool allowMultiple, object htmlAttributes)
+            => Tag("select");
+        public TagBuilder GenerateSelect(ViewContext viewContext, ModelExplorer modelExplorer, string optionLabel, string expression, IEnumerable<SelectListItem> selectList, ICollection<string> currentValues, bool allowMultiple, object htmlAttributes)
+            => Tag("select");
+        public IHtmlContent GenerateGroupsAndOptions(string optionLabel, IEnumerable<SelectListItem> selectList)
+            => HtmlString.Empty;
+        public TagBuilder GenerateTextArea(ViewContext viewContext, ModelExplorer modelExplorer, string expression, int rows, int columns, object htmlAttributes)
+            => Tag("textarea");
+        public TagBuilder GenerateTextBox(ViewContext viewContext, ModelExplorer modelExplorer, string expression, object value, string format, object htmlAttributes)
+            => Tag("input");
+        public TagBuilder GenerateValidationMessage(ViewContext viewContext, ModelExplorer modelExplorer, string expression, string message, string tag, object htmlAttributes)
+            => Tag("span");
+        public TagBuilder GenerateValidationSummary(ViewContext viewContext, bool excludePropertyErrors, string message, string headerTag, object htmlAttributes)
+            => Tag("div");
+        public ICollection<string> GetCurrentValues(ViewContext viewContext, ModelExplorer modelExplorer, string expression, bool allowMultiple)
+            => new List<string>();
+    }
+
+    private sealed class CoverageFormFile : IFormFile
+    {
+        private readonly byte[] _content;
+
+        public CoverageFormFile(string name, string fileName, string contentType, byte[] content)
+        {
+            Name = name;
+            FileName = fileName;
+            ContentType = contentType;
+            _content = content;
+        }
+
+        public string ContentType { get; }
+        public string ContentDisposition => $"form-data; name=\"{Name}\"; filename=\"{FileName}\"";
+        public IHeaderDictionary Headers { get; } = new HeaderDictionary();
+        public long Length => _content.Length;
+        public string Name { get; }
+        public string FileName { get; }
+        public void CopyTo(Stream target) => target.Write(_content, 0, _content.Length);
+        public Task CopyToAsync(Stream target, CancellationToken cancellationToken = default)
+        {
+            target.Write(_content, 0, _content.Length);
+            return Task.CompletedTask;
+        }
+        public Stream OpenReadStream() => new MemoryStream(_content, writable: false);
+    }
+
+    // 1x1 JPEG so picture/upload paths accept the file.
+    private static readonly byte[] CoverageJpeg =
+    [
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+        0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
+        0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09,
+        0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
+        0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
+        0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29,
+        0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
+        0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01,
+        0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x14, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00,
+        0x3F, 0x00, 0x7F, 0xFF, 0xD9
+    ];
 
     private sealed class DummyRouter : IRouter
     {

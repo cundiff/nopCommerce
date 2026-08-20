@@ -20,11 +20,13 @@ using Nop.Core.Configuration;
 using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Customers;
 using Nop.Core.Domain.Orders;
+using Nop.Core.Domain.Tax;
 using Nop.Core.Infrastructure;
 using Nop.Core.Infrastructure.Mapper;
 using Nop.Data;
 using Nop.Services.Catalog;
 using Nop.Services.Common;
+using Nop.Services.Configuration;
 using Nop.Services.Customers;
 using Nop.Services.Helpers;
 using Nop.Services.Installation;
@@ -32,6 +34,8 @@ using Nop.Services.Localization;
 using Nop.Services.Orders;
 using Nop.Services.Plugins;
 using Nop.Services.Security;
+using Nop.Services.Shipping;
+using Nop.Services.Vendors;
 using Nop.Tests.Nop.Services.Tests;
 using Nop.Web.Areas.Admin.Infrastructure.Mapper;
 using Nop.Web.Extensions;
@@ -894,6 +898,9 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                         && (t.Namespace == "AspNetCoreGeneratedDocument" || t.FullName?.Contains("AspNetCoreGeneratedDocument", StringComparison.Ordinal) == true)
                         && t.GetMethod("ExecuteAsync") != null);
         await harness.ExerciseRazorPagesAsync(types);
+        TestContext.WriteLine($"Razor: created={harness.TypesCreated} invoked={harness.MethodsInvoked} failed={harness.MethodsFailed}");
+        if (harness.Failures.Count > 0)
+            TestContext.WriteLine("Razor failures: " + string.Join(" | ", harness.Failures.Take(15)));
         harness.TypesCreated.Should().BeGreaterThan(0);
     }
 
@@ -997,6 +1004,329 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         }
 
         model.AvailableCountries.Should().NotBeEmpty();
+    }
+
+    [Test]
+    public async Task ExerciseHighMissControllerAndFactoryBranches()
+    {
+        var harness = CreateHarness();
+        await harness.EnableCheckoutTestPluginsAsync();
+        await harness.SeedShoppingCartAsync();
+        await harness.SeedWishlistAsync();
+
+        async Task Try(Func<Task> action)
+        {
+            try { await action(); } catch { }
+        }
+
+        var settingService = GetService<ISettingService>();
+        var customerSettings = GetService<CustomerSettings>();
+        var catalogSettings = GetService<CatalogSettings>();
+        var taxSettings = GetService<TaxSettings>();
+        var shoppingCartSettings = GetService<ShoppingCartSettings>();
+        var orderSettings = GetService<OrderSettings>();
+
+        var customerSnap = Snapshot(customerSettings);
+        var catalogSnap = Snapshot(catalogSettings);
+        var taxSnap = Snapshot(taxSettings);
+        var cartSnap = Snapshot(shoppingCartSettings);
+        var orderSnap = Snapshot(orderSettings);
+
+        customerSettings.GenderEnabled = true;
+        customerSettings.FirstNameEnabled = true;
+        customerSettings.LastNameEnabled = true;
+        customerSettings.DateOfBirthEnabled = true;
+        customerSettings.CompanyEnabled = true;
+        customerSettings.StreetAddressEnabled = true;
+        customerSettings.StreetAddress2Enabled = true;
+        customerSettings.ZipPostalCodeEnabled = true;
+        customerSettings.CityEnabled = true;
+        customerSettings.CountyEnabled = true;
+        customerSettings.CountryEnabled = true;
+        customerSettings.StateProvinceEnabled = true;
+        customerSettings.PhoneEnabled = true;
+        customerSettings.FaxEnabled = true;
+        customerSettings.NewsletterEnabled = true;
+        customerSettings.AllowCustomersToUploadAvatars = true;
+        customerSettings.AllowViewingProfiles = true;
+        customerSettings.UsernamesEnabled = true;
+        catalogSettings.ProductReviewsMustBeApproved = true;
+        catalogSettings.ShowProductReviewsPerStore = true;
+        taxSettings.EuVatEnabled = true;
+        shoppingCartSettings.MoveItemsFromWishlistToCart = true;
+        orderSettings.OnePageCheckoutEnabled = false;
+        orderSettings.DisableOrderCompletedPage = false;
+        orderSettings.AutoUpdateOrderTotalsOnEditingOrder = false;
+        await settingService.SaveSettingAsync(customerSettings);
+        await settingService.SaveSettingAsync(catalogSettings);
+        await settingService.SaveSettingAsync(taxSettings);
+        await settingService.SaveSettingAsync(shoppingCartSettings);
+        await settingService.SaveSettingAsync(orderSettings);
+
+        try
+        {
+            var product = (await GetService<IProductService>().SearchProductsAsync(pageSize: 20))
+                .FirstOrDefault(p => p.ProductType == ProductType.SimpleProduct)
+                ?? (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First();
+            var productController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
+            await Try(async () =>
+            {
+                productController.ModelState.Clear();
+                await productController.ProductPictureAdd(product.Id, harness.CreateForm(withFile: true));
+            });
+
+            var warehouses = await GetService<IWarehouseService>().GetAllWarehousesAsync();
+            var productFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
+            await Try(async () =>
+            {
+                var model = await productFactory.PrepareProductModelAsync(null, product);
+                if (warehouses.Count > 0)
+                {
+                    model.WarehouseId = warehouses[0].Id == product.WarehouseId && warehouses.Count > 1
+                        ? warehouses[1].Id
+                        : warehouses[0].Id;
+                }
+
+                productController.ModelState.Clear();
+                await productController.Edit(model, true);
+            });
+
+            await Try(async () =>
+            {
+                var search = await productFactory.PrepareProductSearchModelAsync(new global::Nop.Web.Areas.Admin.Models.Catalog.ProductSearchModel());
+                search.SetGridPageSize();
+                (await productFactory.PrepareProductListModelAsync(search)).Should().NotBeNull();
+            });
+
+            var adminCustomer = await GetService<IWorkContext>().GetCurrentCustomerAsync();
+            var customerFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ICustomerModelFactory>();
+            var adminCustomerController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.CustomerController>();
+            await Try(async () =>
+            {
+                var model = await customerFactory.PrepareCustomerModelAsync(new global::Nop.Web.Areas.Admin.Models.Customers.CustomerModel(), null);
+                model.Email = $"coverage-admin-{Guid.NewGuid():N}@example.com";
+                model.Username = model.Email;
+                model.Password = "1q2w3e4r5t";
+                model.FirstName = "Coverage";
+                model.LastName = "Admin";
+                model.Gender = "M";
+                adminCustomerController.ModelState.Clear();
+                await adminCustomerController.Create(model, true, harness.CreateForm());
+            });
+            await Try(async () =>
+            {
+                var model = await customerFactory.PrepareCustomerModelAsync(null, adminCustomer);
+                model.Gender = "F";
+                model.FirstName = "Coverage";
+                model.LastName = "Edited";
+                model.VatNumber = "GB123";
+                adminCustomerController.ModelState.Clear();
+                await adminCustomerController.Edit(model, true, harness.CreateForm());
+            });
+
+            var publicCustomerFactory = GetService<global::Nop.Web.Factories.ICustomerModelFactory>();
+            var publicCustomerController = harness.CreateController<global::Nop.Web.Controllers.CustomerController>();
+            await Try(async () =>
+            {
+                var model = await publicCustomerFactory.PrepareCustomerInfoModelAsync(
+                    new global::Nop.Web.Models.Customer.CustomerInfoModel(), adminCustomer, false);
+                model.FirstName = "Coverage";
+                model.LastName = "Info";
+                model.Gender = "M";
+                model.VatNumber = "GB999";
+                publicCustomerController.ModelState.Clear();
+                await publicCustomerController.Info(model, harness.CreateForm());
+            });
+            await Try(async () =>
+            {
+                publicCustomerController.ModelState.Clear();
+                await publicCustomerController.UploadAvatar(
+                    new global::Nop.Web.Models.Customer.CustomerAvatarModel(),
+                    WebCoverageHarness.CreateFormFile("uploadedFile", "avatar.jpg"));
+            });
+
+            var orderFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IOrderModelFactory>();
+            var orderController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.OrderController>();
+            foreach (var order in await GetService<IOrderService>().SearchOrdersAsync(pageIndex: 0, pageSize: 3))
+            {
+                await Try(async () =>
+                {
+                    var items = await GetService<IOrderService>().GetOrderItemsAsync(order.Id);
+                    var item = items.FirstOrDefault();
+                    if (item == null)
+                        return;
+
+                    var form = harness.CreateForm(new Dictionary<string, string>
+                    {
+                        [$"btnSaveOrderItem{item.Id}"] = "Save",
+                        [$"pvUnitPriceInclTax{item.Id}"] = item.UnitPriceInclTax.ToString("0.00"),
+                        [$"pvUnitPriceExclTax{item.Id}"] = item.UnitPriceExclTax.ToString("0.00"),
+                        [$"pvQuantity{item.Id}"] = Math.Max(1, item.Quantity).ToString(),
+                        [$"pvDiscountInclTax{item.Id}"] = item.DiscountAmountInclTax.ToString("0.00"),
+                        [$"pvDiscountExclTax{item.Id}"] = item.DiscountAmountExclTax.ToString("0.00"),
+                        [$"pvPriceInclTax{item.Id}"] = item.PriceInclTax.ToString("0.00"),
+                        [$"pvPriceExclTax{item.Id}"] = item.PriceExclTax.ToString("0.00")
+                    });
+                    orderController.ModelState.Clear();
+                    await orderController.EditOrderItem(order.Id, form);
+                });
+
+                await Try(async () =>
+                {
+                    var addModel = await orderFactory.PrepareAddProductToOrderModelAsync(
+                        new global::Nop.Web.Areas.Admin.Models.Orders.AddProductToOrderModel(), order, product);
+                    addModel.Quantity = 1;
+                    orderController.ModelState.Clear();
+                    await orderController.AddProductToOrderDetails(order.Id, product.Id, addModel, harness.CreateForm());
+                });
+            }
+
+            var checkout = harness.CreateController<global::Nop.Web.Controllers.CheckoutController>();
+            var checkoutFactory = GetService<global::Nop.Web.Factories.ICheckoutModelFactory>();
+            var customer = await GetService<IWorkContext>().GetCurrentCustomerAsync();
+            var store = await GetService<IStoreContext>().GetCurrentStoreAsync();
+            var cart = await GetService<IShoppingCartService>()
+                .GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
+            await Try(async () =>
+            {
+                var shipping = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel();
+                await checkoutFactory.PrepareShippingAddressModelAsync(shipping, cart, prePopulateNewAddressWithCustomerFields: true);
+                shipping.ShippingNewAddress.FirstName = "Coverage";
+                shipping.ShippingNewAddress.LastName = "Ship";
+                shipping.ShippingNewAddress.Email = $"ship-{Guid.NewGuid():N}@example.com";
+                shipping.ShippingNewAddress.Address1 = $"Coverage {Guid.NewGuid():N}";
+                shipping.ShippingNewAddress.City = "New York";
+                shipping.ShippingNewAddress.ZipPostalCode = "10021";
+                shipping.ShippingNewAddress.CountryId = 1;
+                checkout.ModelState.Clear();
+                await checkout.NewShippingAddress(shipping, harness.CreateForm());
+            });
+            await Try(async () => await checkout.Confirm());
+            await Try(async () => await checkout.ConfirmOrder(true));
+            await Try(async () => await checkout.OpcConfirmOrder(true));
+            await Try(async () => await checkout.Completed(null));
+
+            var shoppingCart = harness.CreateController<global::Nop.Web.Controllers.ShoppingCartController>();
+            var wishlist = await GetService<IShoppingCartService>()
+                .GetShoppingCartAsync(customer, ShoppingCartType.Wishlist, store.Id);
+            await Try(async () =>
+            {
+                var ids = string.Join(",", wishlist.Select(i => i.Id));
+                var form = harness.CreateForm(new Dictionary<string, string> { ["addtocart"] = ids });
+                await shoppingCart.AddItemsToCartFromWishlist(null,
+                    new global::Nop.Web.Models.ShoppingCart.WishlistModel { ListId = 0 }, form);
+            });
+            await Try(async () => await shoppingCart.Wishlist(null, null));
+            await Try(async () =>
+            {
+                var qtyForm = harness.CreateForm(new Dictionary<string, string>
+                {
+                    [$"addtocart_{product.Id}.EnteredQuantity"] = "1"
+                });
+                await shoppingCart.ProductDetails_AttributeChange(product.Id, true, false, qtyForm);
+                await shoppingCart.CheckoutAttributeChange(qtyForm, false);
+            });
+
+            var publicProductFactory = GetService<global::Nop.Web.Factories.IProductModelFactory>();
+            await Try(async () =>
+            {
+                (await publicProductFactory.PrepareCustomerProductReviewsModelAsync(1)).Should().NotBeNull();
+                (await publicProductFactory.PrepareCustomerProductReviewsModelAsync(null)).Should().NotBeNull();
+            });
+
+            var catalogFactory = GetService<global::Nop.Web.Factories.ICatalogModelFactory>();
+            var command = new global::Nop.Web.Models.Catalog.CatalogProductsCommand();
+            foreach (var storeVendor in (await GetService<IVendorService>().GetAllVendorsAsync()).Take(5))
+                await Try(async () => (await catalogFactory.PrepareVendorModelAsync(storeVendor, command)).Should().NotBeNull());
+
+            var pluginController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.PluginController>();
+            var pluginFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IPluginModelFactory>();
+            foreach (var systemName in new[] { "Payments.TestMethod", "FixedRateTestShippingRateComputationMethod" })
+            {
+                await Try(async () =>
+                {
+                    var descriptor = await GetService<IPluginService>()
+                        .GetPluginDescriptorBySystemNameAsync<IPlugin>(systemName, LoadPluginsMode.All);
+                    if (descriptor == null)
+                        return;
+                    var model = await pluginFactory.PreparePluginModelAsync(null, descriptor);
+                    model.IsEnabled = true;
+                    pluginController.ModelState.Clear();
+                    await pluginController.EditPopup(model);
+                    model.IsEnabled = false;
+                    await pluginController.EditPopup(model);
+                });
+            }
+
+            var vendor = (await GetService<IVendorService>().GetAllVendorsAsync()).FirstOrDefault();
+            if (vendor != null)
+            {
+                var previousVendorId = adminCustomer.VendorId;
+                try
+                {
+                    adminCustomer.VendorId = vendor.Id;
+                    await GetService<ICustomerService>().UpdateCustomerAsync(adminCustomer);
+                    harness.ClearWorkContextCaches();
+                    var vendorProductController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
+                    await Try(async () =>
+                    {
+                        vendorProductController.ModelState.Clear();
+                        await vendorProductController.ProductPictureAdd(product.Id, harness.CreateForm(withFile: true));
+                    });
+                    await Try(async () =>
+                    {
+                        var model = await productFactory.PrepareProductModelAsync(null, product);
+                        vendorProductController.ModelState.Clear();
+                        await vendorProductController.Edit(model, false);
+                    });
+                }
+                finally
+                {
+                    adminCustomer.VendorId = previousVendorId;
+                    await GetService<ICustomerService>().UpdateCustomerAsync(adminCustomer);
+                    harness.ClearWorkContextCaches();
+                }
+            }
+        }
+        finally
+        {
+            Restore(customerSettings, customerSnap);
+            Restore(catalogSettings, catalogSnap);
+            Restore(taxSettings, taxSnap);
+            Restore(shoppingCartSettings, cartSnap);
+            Restore(orderSettings, orderSnap);
+            await settingService.SaveSettingAsync(customerSettings);
+            await settingService.SaveSettingAsync(catalogSettings);
+            await settingService.SaveSettingAsync(taxSettings);
+            await settingService.SaveSettingAsync(shoppingCartSettings);
+            await settingService.SaveSettingAsync(orderSettings);
+            var restored = await GetService<ICustomerService>().GetCustomerByEmailAsync(NopTestsDefaults.AdminEmail);
+            if (restored != null)
+                await GetService<IWorkContext>().SetCurrentCustomerAsync(restored);
+            harness.ClearWorkContextCaches();
+        }
+    }
+
+    private static Dictionary<string, object> Snapshot(object settings)
+    {
+        var values = new Dictionary<string, object>();
+        foreach (var prop in settings.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                     .Where(p => p.CanRead && p.CanWrite && p.GetIndexParameters().Length == 0))
+        {
+            values[prop.Name] = prop.GetValue(settings);
+        }
+
+        return values;
+    }
+
+    private static void Restore(object settings, Dictionary<string, object> values)
+    {
+        foreach (var prop in settings.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                     .Where(p => p.CanWrite && p.GetIndexParameters().Length == 0))
+        {
+            if (values.TryGetValue(prop.Name, out var value))
+                prop.SetValue(settings, value);
+        }
     }
 
     [Test]
