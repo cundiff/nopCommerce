@@ -11,8 +11,10 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Abstractions;
+using Microsoft.AspNetCore.Mvc.Razor;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.AspNetCore.Mvc.Routing;
+using Microsoft.AspNetCore.Mvc.ViewEngines;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Caching.Distributed;
@@ -64,6 +66,7 @@ using Nop.Services.Messages;
 using Nop.Services.Orders;
 using Nop.Services.Payments;
 using Nop.Services.Plugins;
+using Nop.Services.Plugins.Marketplace;
 using Nop.Services.ScheduleTasks;
 using Nop.Services.Security;
 using Nop.Services.Seo;
@@ -187,6 +190,14 @@ public partial class BaseNopTest
         var htmlHelper = new Mock<IHtmlHelper>();
         services.AddSingleton(htmlHelper.Object);
 
+        var coverageView = new Mock<IView>();
+        coverageView.Setup(v => v.RenderAsync(It.IsAny<ViewContext>())).Returns(Task.CompletedTask);
+        var foundView = ViewEngineResult.Found("coverage", coverageView.Object);
+        var razorViewEngine = new Mock<IRazorViewEngine>();
+        razorViewEngine.Setup(e => e.FindView(It.IsAny<ActionContext>(), It.IsAny<string>(), It.IsAny<bool>())).Returns(foundView);
+        razorViewEngine.Setup(e => e.GetView(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>())).Returns(foundView);
+        services.AddSingleton<IRazorViewEngine>(razorViewEngine.Object);
+
         //file provider
         services.AddTransient<INopFileProvider, NopFileProvider>();
         CommonHelper.DefaultFileProvider = new NopFileProvider(webHostEnvironment.Object);
@@ -278,6 +289,7 @@ public partial class BaseNopTest
 
         //plugins
         services.AddTransient<IPluginService, PluginService>();
+        services.AddTransient<OfficialFeedManager>();
 
         services.AddScoped<IShortTermCacheManager, PerRequestCacheManager>();
 

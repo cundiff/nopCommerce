@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.AspNetCore.Mvc.Routing;
+using Microsoft.AspNetCore.Mvc.Razor;
 using Microsoft.AspNetCore.Mvc.ViewComponents;
 using Microsoft.AspNetCore.Mvc.ViewEngines;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
@@ -14,19 +15,36 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
 using Nop.Core;
+using Nop.Core.Domain.Orders;
+using Nop.Core.Events;
 using Nop.Data;
+using Nop.Services.Catalog;
+using Nop.Services.Customers;
+using Nop.Services.Orders;
 using Nop.Web.Framework.Models;
 
 namespace Nop.Tests.Nop.Web.Tests.Coverage;
 
 /// <summary>
 /// Invokes Nop.Web surface methods with sample-data arguments so coverable lines run.
-/// Destructive methods (Delete/Import/Uninstall) are skipped; save-style actions run with invalid ModelState.
+/// Destructive methods (Delete/Import/Uninstall/ConfirmOrder) are skipped.
+/// Save-style actions are first invoked with invalid ModelState, then GET→POST pairs
+/// re-run the same actions with a factory-prepared model and valid ModelState.
 /// </summary>
 public sealed class WebCoverageHarness
 {
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan RoundTripTimeout = TimeSpan.FromSeconds(90);
+
+    private static readonly Dictionary<string, Type> EntityTypes =
+        typeof(global::Nop.Core.Domain.Catalog.Product).Assembly.GetTypes()
+            .Where(t => t.IsClass && !t.IsAbstract && typeof(BaseEntity).IsAssignableFrom(t))
+            .GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
     private readonly IServiceProvider _services;
-    private readonly Dictionary<Type, object> _entities = [];
+    private readonly Dictionary<Type, BaseEntity> _entities = [];
+    private readonly Dictionary<Type, IList<BaseEntity>> _entityLists = [];
 
     public WebCoverageHarness(IServiceProvider services)
     {
@@ -37,7 +55,150 @@ public sealed class WebCoverageHarness
     public int MethodsInvoked { get; private set; }
     public int MethodsFailed { get; private set; }
     public int TypesFailed { get; private set; }
+    public int ValidPosts { get; private set; }
     public List<string> Failures { get; } = [];
+
+    public T CreateController<T>() where T : Controller
+    {
+        var instance = ActivatorUtilities.CreateInstance<T>(_services);
+        AttachMvc(instance);
+        TypesCreated++;
+        return instance;
+    }
+
+    public async Task SeedShoppingCartAsync()
+    {
+        var workContext = _services.GetRequiredService<IWorkContext>();
+        var customer = await workContext.GetCurrentCustomerAsync();
+        var store = await _services.GetRequiredService<IStoreContext>().GetCurrentStoreAsync();
+        var cartService = _services.GetRequiredService<IShoppingCartService>();
+        var products = await _services.GetRequiredService<IProductService>().SearchProductsAsync(pageSize: 20);
+
+        foreach (var product in products)
+        {
+            try
+            {
+                await cartService.AddToCartAsync(customer, product, ShoppingCartType.ShoppingCart, store.Id,
+                    quantity: 1, addRequiredProducts: false);
+            }
+            catch
+            {
+                // attribute-required products are skipped
+            }
+        }
+    }
+
+    public async Task ExerciseEditRoundTripsAsync(IEnumerable<Type> controllerTypes)
+        => await ExerciseGetPostPairsAsync(controllerTypes);
+
+    public async Task ExerciseGetPostPairsAsync(IEnumerable<Type> controllerTypes)
+    {
+        foreach (var type in controllerTypes)
+        {
+            object controller;
+            try
+            {
+                controller = ActivatorUtilities.CreateInstance(_services, type);
+                AttachMvc(controller);
+                TypesCreated++;
+            }
+            catch (Exception ex)
+            {
+                TypesFailed++;
+                Failures.Add($"{type.Name}: create {ex.GetBaseException().Message}");
+                continue;
+            }
+
+            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+                .Where(m => !m.IsSpecialName && m.DeclaringType == type)
+                .ToList();
+
+            foreach (var group in methods.GroupBy(m => m.Name))
+            {
+                if (ShouldSkipMethodName(group.Key) || IsCreateLike(group.Key))
+                    continue;
+
+                var posts = group.Where(m =>
+                        m.GetParameters().Any(p => p.ParameterType.Name.EndsWith("Model", StringComparison.Ordinal)
+                                                   && !p.ParameterType.Name.Contains("Search", StringComparison.Ordinal)))
+                    .ToList();
+                if (posts.Count == 0)
+                    continue;
+
+                var gets = group.Where(m =>
+                {
+                    var ps = m.GetParameters();
+                    return ps.Length == 0
+                           || (ps.Length == 1 && (ps[0].ParameterType == typeof(int) || ps[0].ParameterType == typeof(int?)));
+                }).ToList();
+
+                foreach (var post in posts)
+                {
+                    var modelParam = post.GetParameters().First(p => p.ParameterType.Name.EndsWith("Model", StringComparison.Ordinal));
+                    object prepared = null;
+
+                    foreach (var get in gets)
+                    {
+                        var getArgs = get.GetParameters().Select(p =>
+                            p.ParameterType == typeof(int) || p.ParameterType == typeof(int?)
+                                ? (object)ResolveId(p.Name, type, modelParam.ParameterType)
+                                : CreateArg(p.ParameterType, p.Name, type)).ToArray();
+
+                        var (ok, result) = await TryInvokeAsync(controller, get, getArgs, RoundTripTimeout);
+                        if (!ok)
+                            continue;
+
+                        MethodsInvoked++;
+                        prepared = (result as ViewResult)?.Model;
+                        if (prepared != null && modelParam.ParameterType.IsInstanceOfType(prepared))
+                            break;
+                        prepared = null;
+                    }
+
+                    if (prepared == null)
+                    {
+                        prepared = CreateArg(modelParam.ParameterType, modelParam.Name, type);
+                        var idProp = modelParam.ParameterType.GetProperty("Id");
+                        if (idProp?.CanWrite == true && idProp.PropertyType == typeof(int))
+                        {
+                            var id = ResolveId("id", type, modelParam.ParameterType);
+                            if (id > 0)
+                                idProp.SetValue(prepared, id);
+                        }
+                    }
+
+                    if (prepared == null)
+                        continue;
+
+                    if (controller is Controller mvc)
+                        mvc.ModelState.Clear();
+
+                    var postArgs = post.GetParameters().Select(p =>
+                    {
+                        if (p.Name == "continueEditing")
+                            return (object)true;
+                        if (p.ParameterType.IsInstanceOfType(prepared) || p.ParameterType.IsAssignableFrom(prepared.GetType()))
+                            return prepared;
+                        return CreateArg(p.ParameterType, p.Name, type);
+                    }).ToArray();
+
+                    var (posted, _) = await TryInvokeAsync(controller, post, postArgs, RoundTripTimeout);
+                    if (posted)
+                    {
+                        MethodsInvoked++;
+                        ValidPosts++;
+                    }
+                    else
+                    {
+                        MethodsFailed++;
+                    }
+
+                    if (controller is Controller clear)
+                        clear.ModelState.Clear();
+                }
+            }
+        }
+    }
 
     public async Task ExerciseTypesAsync(IEnumerable<Type> types, bool asMvc)
     {
@@ -68,27 +229,175 @@ public sealed class WebCoverageHarness
 
         foreach (var method in methods)
         {
+            await InvokeMethodAsync(instance, method, boolOverrides: false, nullEntities: false, extraEntity: null);
+
+            if (method.GetParameters().Any(p => p.ParameterType == typeof(bool) || p.ParameterType == typeof(bool?)))
+                await InvokeMethodAsync(instance, method, boolOverrides: true, nullEntities: false, extraEntity: null);
+
+            if (method.GetParameters().Any(p => typeof(BaseEntity).IsAssignableFrom(p.ParameterType)))
+                await InvokeMethodAsync(instance, method, boolOverrides: false, nullEntities: true, extraEntity: null);
+
+            if (!asMvc && method.Name.StartsWith("Prepare", StringComparison.Ordinal))
+            {
+                var entityParam = method.GetParameters()
+                    .FirstOrDefault(p => typeof(BaseEntity).IsAssignableFrom(p.ParameterType));
+                if (entityParam != null)
+                {
+                    foreach (var extra in GetEntities(entityParam.ParameterType, 12))
+                        await InvokeMethodAsync(instance, method, boolOverrides: false, nullEntities: false, extraEntity: extra);
+                }
+            }
+        }
+    }
+
+    public async Task ExerciseCheckoutFlowAsync()
+    {
+        await SeedShoppingCartAsync();
+
+        var checkoutType = typeof(global::Nop.Web.Controllers.CheckoutController);
+        object checkout;
+        try
+        {
+            checkout = ActivatorUtilities.CreateInstance(_services, checkoutType);
+            AttachMvc(checkout);
+            TypesCreated++;
+        }
+        catch (Exception ex)
+        {
+            TypesFailed++;
+            Failures.Add($"CheckoutController: create {ex.GetBaseException().Message}");
+            return;
+        }
+
+        var customer = await _services.GetRequiredService<IWorkContext>().GetCurrentCustomerAsync();
+        var addresses = await _services.GetRequiredService<ICustomerService>().GetAddressesByCustomerIdAsync(customer.Id);
+        var addressId = addresses.FirstOrDefault()?.Id ?? GetEntityIds("Address").FirstOrDefault();
+
+        var formValues = new Dictionary<string, StringValues>();
+        if (addressId > 0)
+        {
+            formValues["billing_address_id"] = addressId.ToString();
+            formValues["shipping_address_id"] = addressId.ToString();
+        }
+
+        var form = new FormCollection(formValues);
+
+        async Task Call(string name, params object[] args)
+        {
+            var method = checkoutType.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+                .FirstOrDefault(m => m.Name == name && m.GetParameters().Length == args.Length);
+            if (method == null)
+                return;
+            var (ok, _) = await TryInvokeAsync(checkout, method, args, RoundTripTimeout);
+            if (ok)
+                MethodsInvoked++;
+            else
+                MethodsFailed++;
+        }
+
+        await Call("Index");
+        await Call("OnePageCheckout");
+        await Call("BillingAddress", form);
+        if (addressId > 0)
+            await Call("SelectBillingAddress", addressId, true);
+
+        var billingModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel), "model", checkoutType);
+        await Call("OpcSaveBilling", billingModel, form);
+
+        await Call("ShippingAddress");
+        if (addressId > 0)
+            await Call("SelectShippingAddress", addressId);
+
+        var shippingModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel), "model", checkoutType);
+        await Call("OpcSaveShipping", shippingModel, form);
+
+        await Call("ShippingMethod");
+        await Call("SelectShippingMethod", "test", form);
+        await Call("OpcSaveShippingMethod", "test", form);
+        await Call("PaymentMethod");
+        var paymentModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel), "model", checkoutType);
+        await Call("SelectPaymentMethod", "Payments.CheckMoneyOrder", paymentModel);
+        await Call("OpcSavePaymentMethod", "Payments.CheckMoneyOrder", paymentModel);
+        await Call("PaymentInfo");
+        await Call("EnterPaymentInfo", form);
+        await Call("OpcSavePaymentInfo", form);
+        await Call("Confirm");
+        await Call("Completed", (int?)null);
+    }
+
+    private async Task InvokeMethodAsync(object instance, MethodInfo method, bool boolOverrides, bool nullEntities, BaseEntity extraEntity)
+    {
+        try
+        {
+            if (instance is Controller controller && IsLikelyMutating(method))
+                controller.ModelState.AddModelError("_coverage", "do not persist");
+
+            var args = method.GetParameters().Select(p =>
+            {
+                if (nullEntities && typeof(BaseEntity).IsAssignableFrom(p.ParameterType))
+                    return null;
+                if (extraEntity != null && p.ParameterType.IsInstanceOfType(extraEntity))
+                    return extraEntity;
+                if (boolOverrides && (p.ParameterType == typeof(bool) || p.ParameterType == typeof(bool?)))
+                    return true;
+                return CreateArg(p.ParameterType, p.Name, instance.GetType());
+            }).ToArray();
+
+            var (ok, _) = await TryInvokeAsync(instance, method, args, DefaultTimeout);
+            if (ok)
+                MethodsInvoked++;
+            else
+            {
+                MethodsFailed++;
+                if (Failures.Count < 80)
+                    Failures.Add($"{instance.GetType().Name}.{method.Name}: invoke failed or timed out");
+            }
+        }
+        catch (Exception ex)
+        {
+            MethodsFailed++;
+            var message = ex.GetBaseException().Message;
+            if (Failures.Count < 80)
+                Failures.Add($"{instance.GetType().Name}.{method.Name}: {message}");
+        }
+        finally
+        {
+            if (instance is Controller controller)
+                controller.ModelState.Clear();
+        }
+    }
+
+    public async Task ExerciseRazorPagesAsync(IEnumerable<Type> types)
+    {
+        foreach (var type in types)
+        {
             try
             {
-                if (instance is Controller controller && IsLikelyMutating(method))
-                    controller.ModelState.AddModelError("_coverage", "do not persist");
+                var instance = Activator.CreateInstance(type);
+                if (instance == null)
+                    continue;
 
-                var args = method.GetParameters().Select(p => CreateArg(p.ParameterType, p.Name)).ToArray();
-                var result = method.Invoke(instance, args);
-                await AwaitIfNeeded(result);
-                MethodsInvoked++;
+                TypesCreated++;
+                AttachMvc(instance);
+
+                if (instance is RazorPageBase razorPage)
+                    razorPage.Layout = null;
+
+                var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
+                if (execute == null)
+                    continue;
+
+                var (ok, _) = await TryInvokeAsync(instance, execute, [], TimeSpan.FromSeconds(3));
+                if (ok)
+                    MethodsInvoked++;
+                else
+                    MethodsFailed++;
             }
             catch (Exception ex)
             {
                 MethodsFailed++;
-                var message = ex.GetBaseException().Message;
                 if (Failures.Count < 80)
-                    Failures.Add($"{type.Name}.{method.Name}: {message}");
-            }
-            finally
-            {
-                if (instance is Controller controller)
-                    controller.ModelState.Clear();
+                    Failures.Add($"{type.Name}: {ex.GetBaseException().Message}");
             }
         }
     }
@@ -126,7 +435,7 @@ public sealed class WebCoverageHarness
                 {
                     if (prop.CanWrite && prop.GetIndexParameters().Length == 0)
                     {
-                        var value = CreateArg(prop.PropertyType, prop.Name);
+                        var value = CreateArg(prop.PropertyType, prop.Name, type);
                         prop.SetValue(instance, value);
                     }
 
@@ -150,10 +459,12 @@ public sealed class WebCoverageHarness
         {
             try
             {
-                var args = method.GetParameters().Select(p => CreateArg(p.ParameterType, p.Name)).ToArray();
-                var result = method.Invoke(null, args);
-                await AwaitIfNeeded(result);
-                MethodsInvoked++;
+                var args = method.GetParameters().Select(p => CreateArg(p.ParameterType, p.Name, type)).ToArray();
+                var (ok, _) = await TryInvokeAsync(null, method, args, DefaultTimeout);
+                if (ok)
+                    MethodsInvoked++;
+                else
+                    MethodsFailed++;
             }
             catch (Exception ex)
             {
@@ -187,7 +498,7 @@ public sealed class WebCoverageHarness
 
             try
             {
-                var model = CreateArg(modelType, "model");
+                var model = CreateArg(modelType, "model", type);
                 var validate = validator.GetType().GetMethods()
                     .FirstOrDefault(m => m.Name == "Validate" && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == modelType);
                 validate?.Invoke(validator, [model]);
@@ -215,6 +526,37 @@ public sealed class WebCoverageHarness
         var url = _services.GetRequiredService<IUrlHelperFactory>().GetUrlHelper(actionContext);
         var tempData = _services.GetRequiredService<ITempDataDictionaryFactory>().GetTempData(http);
 
+        Type modelType = null;
+        for (var t = instance.GetType(); t != null; t = t.BaseType)
+        {
+            if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(RazorPage<>))
+            {
+                modelType = t.GetGenericArguments()[0];
+                break;
+            }
+        }
+
+        var viewData = new ViewDataDictionary(new EmptyModelMetadataProvider(), new ModelStateDictionary());
+        if (modelType != null)
+        {
+            try
+            {
+                viewData.Model = CreateArg(modelType, "Model", instance.GetType());
+            }
+            catch
+            {
+                // compiled views still execute as far as they can with an empty model
+            }
+        }
+
+        var viewContext = new ViewContext(
+            actionContext,
+            NullView.Instance,
+            viewData,
+            tempData,
+            TextWriter.Null,
+            new HtmlHelperOptions());
+
         if (instance is Controller controller)
         {
             controller.ControllerContext = new ControllerContext(actionContext);
@@ -225,29 +567,48 @@ public sealed class WebCoverageHarness
 
         if (instance is ViewComponent component)
         {
-            var viewContext = new ViewContext(
-                actionContext,
-                NullView.Instance,
-                new ViewDataDictionary(new EmptyModelMetadataProvider(), new ModelStateDictionary()),
-                tempData,
-                TextWriter.Null,
-                new HtmlHelperOptions());
-
             component.ViewComponentContext = new ViewComponentContext
             {
                 ViewContext = viewContext
             };
         }
+
+        if (instance is RazorPageBase razorPage)
+        {
+            razorPage.ViewContext = viewContext;
+        }
+    }
+
+    private static bool ShouldSkipMethodName(string name)
+    {
+        return name.Contains("Delete", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("Uninstall", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("Import", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("ClearCache", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("GenerateAll", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("Export", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("Rss", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("Restart", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("Sitemap", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("ConfirmOrder", StringComparison.OrdinalIgnoreCase)
+               || name.Equals("OpcConfirmOrder", StringComparison.Ordinal);
+    }
+
+    private static bool IsCreateLike(string name)
+    {
+        return name.Contains("Create", StringComparison.OrdinalIgnoreCase)
+               || name.Equals("Register", StringComparison.Ordinal)
+               || name.Equals("AddProductToCart_Catalog", StringComparison.Ordinal)
+               || name.Equals("AddProductToCart_Details", StringComparison.Ordinal);
     }
 
     private static bool ShouldSkipMethod(MethodInfo method)
     {
         var name = method.Name;
-        if (name.Contains("Delete", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("Uninstall", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("Import", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("ClearCache", StringComparison.OrdinalIgnoreCase)
-            || name.Contains("GenerateAll", StringComparison.OrdinalIgnoreCase))
+        if (ShouldSkipMethodName(name))
+            return true;
+
+        if (name.Equals("Index", StringComparison.Ordinal) && method.GetParameters().Length > 0 && method.DeclaringType?.Name == "InstallController")
             return true;
 
         if (method.GetParameters().Any(p =>
@@ -277,16 +638,70 @@ public sealed class WebCoverageHarness
         return method.GetParameters().Any(p => typeof(IFormCollection).IsAssignableFrom(p.ParameterType));
     }
 
-    private object CreateArg(Type type, string name)
+    private int ResolveId(string parameterName, Type ownerType, Type modelType = null)
+    {
+        if (modelType != null)
+        {
+            var fromModel = EntityNameFromModel(modelType);
+            var ids = GetEntityIds(fromModel);
+            if (ids.Count > 0)
+                return ids[0];
+        }
+
+        if (!string.IsNullOrEmpty(parameterName) && parameterName.EndsWith("Id", StringComparison.OrdinalIgnoreCase)
+            && !parameterName.Equals("id", StringComparison.OrdinalIgnoreCase))
+        {
+            var entityName = parameterName[..^2];
+            var ids = GetEntityIds(entityName);
+            if (ids.Count > 0)
+                return ids[0];
+        }
+
+        if (ownerType?.Name.EndsWith("Controller", StringComparison.Ordinal) == true)
+        {
+            var ids = GetEntityIds(ownerType.Name.Replace("Controller", string.Empty));
+            if (ids.Count > 0)
+                return ids[0];
+        }
+
+        var products = GetEntityIds("Product");
+        return products.Count > 0 ? products[0] : 1;
+    }
+
+    private static string EntityNameFromModel(Type modelType)
+    {
+        var name = modelType.Name;
+        if (name.EndsWith("SearchModel", StringComparison.Ordinal))
+            return name.Replace("SearchModel", string.Empty);
+        if (name.EndsWith("ListModel", StringComparison.Ordinal))
+            return name.Replace("ListModel", string.Empty);
+        if (name.EndsWith("Model", StringComparison.Ordinal))
+            return name[..^5];
+        return name;
+    }
+
+    private object CreateArg(Type type, string name, Type ownerType)
     {
         type = Nullable.GetUnderlyingType(type) ?? type;
 
         if (type == typeof(string))
             return name?.Contains("email", StringComparison.OrdinalIgnoreCase) == true ? "admin@yourStore.com" : "test";
         if (type == typeof(bool))
+        {
+            if (string.Equals(name, "ShipToSameAddress", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "continueEditing", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "isEditable", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "excludeProperties", StringComparison.OrdinalIgnoreCase))
+                return true;
             return false;
+        }
+
         if (type == typeof(int) || type == typeof(long) || type == typeof(short) || type == typeof(byte))
-            return Convert.ChangeType(1, type);
+        {
+            var id = ResolveId(name, ownerType);
+            return Convert.ChangeType(id, type);
+        }
+
         if (type == typeof(decimal) || type == typeof(double) || type == typeof(float))
             return Convert.ChangeType(1, type);
         if (type == typeof(Guid))
@@ -302,7 +717,18 @@ public sealed class WebCoverageHarness
         if (type == typeof(StringValues))
             return new StringValues("1");
         if (type == typeof(IFormCollection) || type == typeof(FormCollection))
-            return new FormCollection(new Dictionary<string, StringValues>());
+        {
+            var values = new Dictionary<string, StringValues>();
+            var addressId = GetEntityIds("Address").FirstOrDefault();
+            if (addressId > 0)
+            {
+                values["billing_address_id"] = addressId.ToString();
+                values["shipping_address_id"] = addressId.ToString();
+            }
+
+            return new FormCollection(values);
+        }
+
         if (type == typeof(IUrlHelper))
             return _services.GetRequiredService<IUrlHelperFactory>()
                 .GetUrlHelper(new ActionContext(
@@ -316,13 +742,26 @@ public sealed class WebCoverageHarness
         if (type.IsGenericType)
         {
             var def = type.GetGenericTypeDefinition();
-            if (def == typeof(IEnumerable<>) || def == typeof(ICollection<>) || def == typeof(IList<>) || def == typeof(List<>))
+            if (def == typeof(EntityInsertedEvent<>) || def == typeof(EntityUpdatedEvent<>) || def == typeof(EntityDeletedEvent<>))
+            {
+                var entityType = type.GetGenericArguments()[0];
+                var entity = GetEntity(entityType) ?? CreateDefault(entityType);
+                return Activator.CreateInstance(type, entity);
+            }
+
+            if (def == typeof(IEnumerable<>) || def == typeof(ICollection<>) || def == typeof(IList<>) || def == typeof(List<>) || def == typeof(IReadOnlyList<>))
             {
                 var itemType = type.GetGenericArguments()[0];
                 var listType = typeof(List<>).MakeGenericType(itemType);
                 var list = (IList)Activator.CreateInstance(listType)!;
                 if (itemType == typeof(int))
-                    list.Add(1);
+                    list.Add(ResolveId(name, ownerType));
+                else if (typeof(BaseEntity).IsAssignableFrom(itemType))
+                {
+                    foreach (var entity in GetEntities(itemType, 8))
+                        list.Add(entity);
+                }
+
                 return list;
             }
         }
@@ -334,41 +773,119 @@ public sealed class WebCoverageHarness
             return _services.GetService(type);
 
         if (typeof(BaseNopModel).IsAssignableFrom(type) || type.IsClass)
-            return CreateDefault(type);
+        {
+            var created = CreateDefault(type);
+            PopulateModel(created, type, ownerType);
+            return created;
+        }
 
         return type.IsValueType ? Activator.CreateInstance(type) : null;
     }
 
-    private object GetEntity(Type type)
+    private void PopulateModel(object model, Type type, Type ownerType)
+    {
+        if (model == null)
+            return;
+
+        try
+        {
+            var idProp = type.GetProperty("Id");
+            if (idProp?.CanWrite == true && idProp.PropertyType == typeof(int))
+            {
+                var id = ResolveId("id", ownerType, type);
+                if (id > 0)
+                    idProp.SetValue(model, id);
+            }
+
+            foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (!prop.CanWrite || prop.GetIndexParameters().Length != 0)
+                    continue;
+
+                if (prop.Name.EndsWith("Id", StringComparison.Ordinal) && prop.PropertyType == typeof(int) && prop.Name != "Id")
+                {
+                    var id = ResolveId(prop.Name, ownerType);
+                    if (id > 0)
+                        prop.SetValue(model, id);
+                }
+                else if ((prop.Name.Contains("StartDate", StringComparison.Ordinal) || prop.Name == "From")
+                         && (prop.PropertyType == typeof(DateTime) || prop.PropertyType == typeof(DateTime?)))
+                {
+                    prop.SetValue(model, DateTime.UtcNow.AddYears(-1));
+                }
+                else if ((prop.Name.Contains("EndDate", StringComparison.Ordinal) || prop.Name == "To")
+                         && (prop.PropertyType == typeof(DateTime) || prop.PropertyType == typeof(DateTime?)))
+                {
+                    prop.SetValue(model, DateTime.UtcNow.AddDays(1));
+                }
+                else if (prop.Name == "ShipToSameAddress" && prop.PropertyType == typeof(bool))
+                {
+                    prop.SetValue(model, true);
+                }
+                else if (prop.Name is "PageSize" or "Page" && prop.PropertyType == typeof(int))
+                {
+                    prop.SetValue(model, prop.Name == "PageSize" ? 15 : 1);
+                }
+            }
+        }
+        catch
+        {
+            // best-effort model fill
+        }
+    }
+
+    private IList<int> GetEntityIds(string entityName)
+    {
+        if (string.IsNullOrWhiteSpace(entityName) || !EntityTypes.TryGetValue(entityName, out var entityType))
+            return [];
+
+        return GetEntities(entityType, 8).Select(e => e.Id).ToList();
+    }
+
+    private BaseEntity GetEntity(Type type)
     {
         if (_entities.TryGetValue(type, out var cached))
             return cached;
 
+        var list = GetEntities(type, 8);
+        return list.Count > 0 ? list[0] : null;
+    }
+
+    private IList<BaseEntity> GetEntities(Type type, int take)
+    {
+        if (_entityLists.TryGetValue(type, out var cached))
+            return cached.Take(take).ToList();
+
+        var list = new List<BaseEntity>();
         try
         {
             var repoType = typeof(IRepository<>).MakeGenericType(type);
             var repo = _services.GetService(repoType);
-            if (repo == null)
-                return null;
-
-            var getById = repo.GetType().GetMethods().First(m => m.Name == "GetByIdAsync" && m.GetParameters().Length >= 1);
-            var parameters = getById.GetParameters();
-            var invokeArgs = new object[parameters.Length];
-            invokeArgs[0] = 1;
-            for (var i = 1; i < parameters.Length; i++)
-                invokeArgs[i] = parameters[i].HasDefaultValue ? parameters[i].DefaultValue : null;
-
-            var task = (Task)getById.Invoke(repo, invokeArgs);
-            task.GetAwaiter().GetResult();
-            var entity = task.GetType().GetProperty("Result")?.GetValue(task);
-            if (entity != null)
-                _entities[type] = entity;
-            return entity;
+            if (repo != null)
+            {
+                var table = repo.GetType().GetProperty("Table")?.GetValue(repo);
+                if (table is IEnumerable enumerable)
+                {
+                    foreach (var item in enumerable)
+                    {
+                        if (item is BaseEntity entity)
+                            list.Add(entity);
+                        if (list.Count >= 20)
+                            break;
+                    }
+                }
+            }
         }
         catch
         {
-            return null;
+            // entity type may not be mapped
         }
+
+        _entityLists[type] = list;
+        if (list.Count > 0)
+            _entities[type] = list[0];
+
+        return list.Take(take).ToList();
     }
 
     private static object CreateDefault(Type type)
@@ -383,25 +900,32 @@ public sealed class WebCoverageHarness
         }
     }
 
-    private static async Task AwaitIfNeeded(object result)
+    private static async Task<(bool ok, object result)> TryInvokeAsync(object instance, MethodInfo method, object[] args, TimeSpan timeout)
     {
-        switch (result)
+        try
         {
-            case null:
-                return;
-            case Task task:
+            var raw = method.Invoke(instance, args);
+            if (raw is Task task)
+            {
+                var finished = await Task.WhenAny(task, Task.Delay(timeout));
+                if (finished != task)
+                    return (false, null);
+
                 await task;
-                return;
-            default:
-                var type = result.GetType();
-                if (type.FullName?.StartsWith("System.Threading.Tasks.ValueTask", StringComparison.Ordinal) == true)
+                if (task.GetType().IsGenericType)
                 {
-                    var asTask = type.GetMethod("AsTask");
-                    if (asTask?.Invoke(result, null) is Task valueTask)
-                        await valueTask;
+                    var resultProp = task.GetType().GetProperty("Result");
+                    return (true, resultProp?.GetValue(task));
                 }
 
-                break;
+                return (true, null);
+            }
+
+            return (true, raw);
+        }
+        catch
+        {
+            return (false, null);
         }
     }
 
