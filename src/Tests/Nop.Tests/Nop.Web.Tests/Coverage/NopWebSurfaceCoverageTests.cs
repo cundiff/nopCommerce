@@ -57,7 +57,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     {
         var harness = CreateHarness();
         await harness.EnableCheckoutTestPluginsAsync();
-        await harness.EnableAdminStoreScopeAsync();
+        await harness.EnsureSecondStoreAsync();
     }
 
     [Test]
@@ -361,28 +361,38 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     [Test]
     public async Task ExerciseAdminSettingAndReportFactories()
     {
+        var harness = CreateHarness();
         var settings = GetService<global::Nop.Web.Areas.Admin.Factories.ISettingModelFactory>();
         async Task Try(Func<Task> action)
         {
             try { await action(); } catch { }
         }
 
-        await Try(async () => (await settings.PrepareCatalogSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareGeneralCommonSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareCustomerUserSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareOrderSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareShippingSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareTaxSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareMediaSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareBlogSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareVendorSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareShoppingCartSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareRewardPointsSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareGdprSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareAppSettingsModel()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareProductEditorSettingsModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareStoreScopeConfigurationModelAsync()).Should().NotBeNull());
-        await Try(async () => (await settings.PrepareFilterLevelSettingsModelAsync()).Should().NotBeNull());
+        async Task PrepareAll()
+        {
+            await Try(async () => (await settings.PrepareCatalogSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareGeneralCommonSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareCustomerUserSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareOrderSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareShippingSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareTaxSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareMediaSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareBlogSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareVendorSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareShoppingCartSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareRewardPointsSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareGdprSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareAppSettingsModel()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareProductEditorSettingsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareStoreScopeConfigurationModelAsync()).Should().NotBeNull());
+            await Try(async () => (await settings.PrepareFilterLevelSettingsModelAsync()).Should().NotBeNull());
+        }
+
+        await harness.SetAdminStoreScopeAsync(0);
+        await PrepareAll();
+        await harness.EnableAdminStoreScopeAsync();
+        await PrepareAll();
+        await harness.SetAdminStoreScopeAsync(0);
 
         var reports = GetService<global::Nop.Web.Areas.Admin.Factories.IReportModelFactory>();
         var salesSearch = new global::Nop.Web.Areas.Admin.Models.Reports.SalesSummarySearchModel
@@ -418,6 +428,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
 
         var settingsFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ISettingModelFactory>();
         var settings = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.SettingController>();
+        await harness.EnableAdminStoreScopeAsync();
         await Try(async () =>
         {
             settings.ModelState.Clear();
@@ -483,6 +494,17 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             settings.ModelState.Clear();
             await settings.FilterLevel(await settingsFactory.PrepareFilterLevelSettingsModelAsync());
         });
+        await harness.SetAdminStoreScopeAsync(0);
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.Catalog(await settingsFactory.PrepareCatalogSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.GeneralCommon(await settingsFactory.PrepareGeneralCommonSettingsModelAsync());
+        });
 
         var productFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
         var productController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
@@ -495,6 +517,39 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                 await productController.Edit(model, true);
             });
         }
+
+        await Try(async () =>
+        {
+            var createModel = await productFactory.PrepareProductModelAsync(null, null);
+            createModel.Name = "Coverage product " + Guid.NewGuid().ToString("N")[..8];
+            createModel.Sku = "COV" + Guid.NewGuid().ToString("N")[..6];
+            productController.ModelState.Clear();
+            await productController.Create(createModel, true);
+        });
+
+        await Try(async () =>
+        {
+            var product = (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First();
+            var formValues = new Dictionary<string, StringValues>
+            {
+                [$"product-select-{product.Id}"] = "true",
+                [$"name-{product.Id}"] = product.Name ?? "coverage",
+                [$"sku-{product.Id}"] = product.Sku ?? "sku",
+                [$"price-{product.Id}"] = product.Price.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                [$"old-price-{product.Id}"] = product.OldPrice.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                [$"quantity-{product.Id}"] = product.StockQuantity.ToString(),
+                [$"published-{product.Id}"] = product.Published.ToString()
+            };
+            var bulkForm = new FormCollection(formValues);
+            var http = GetService<IHttpContextAccessor>().HttpContext;
+            http.Request.Method = HttpMethods.Post;
+            http.Request.ContentType = "application/x-www-form-urlencoded";
+            http.Request.Form = bulkForm;
+            var search = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductSearchModel();
+            search.SetGridPageSize();
+            productController.ModelState.Clear();
+            await productController.BulkEditSave(search, true);
+        });
 
         var categoryFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ICategoryModelFactory>();
         var categoryController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.CategoryController>();

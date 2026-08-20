@@ -43,6 +43,17 @@ namespace Nop.Tests.Nop.Web.Tests.Coverage;
 /// </summary>
 public sealed class WebCoverageHarness
 {
+    private static readonly Lazy<IServiceProvider> MvcServices = new(CreateMvcServices);
+
+    private static IServiceProvider CreateMvcServices()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOptions();
+        services.AddMvc();
+        return services.BuildServiceProvider();
+    }
+
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan RoundTripTimeout = TimeSpan.FromSeconds(90);
 
@@ -76,38 +87,39 @@ public sealed class WebCoverageHarness
         return instance;
     }
 
-    public async Task EnableAdminStoreScopeAsync()
+    public async Task EnsureSecondStoreAsync()
     {
         var storeService = _services.GetRequiredService<IStoreService>();
         var stores = await storeService.GetAllStoresAsync();
-        if (stores.Count < 2)
-        {
-            var source = stores.First();
-            await storeService.InsertStoreAsync(new Store
-            {
-                Name = "Coverage Store",
-                Url = "http://coverage.local/",
-                Hosts = "coverage.local",
-                SslEnabled = source.SslEnabled,
-                DefaultLanguageId = source.DefaultLanguageId,
-                DisplayOrder = 99,
-                CompanyName = source.CompanyName ?? "Coverage",
-                CompanyAddress = source.CompanyAddress,
-                CompanyPhoneNumber = source.CompanyPhoneNumber,
-                CompanyVat = source.CompanyVat,
-                DefaultTitle = source.DefaultTitle,
-                DefaultMetaDescription = source.DefaultMetaDescription,
-                DefaultMetaKeywords = source.DefaultMetaKeywords,
-                HomepageTitle = source.HomepageTitle,
-                HomepageDescription = source.HomepageDescription
-            });
-            stores = await storeService.GetAllStoresAsync();
-        }
+        if (stores.Count >= 2)
+            return;
 
-        var scopeStore = stores.Last();
+        var source = stores.First();
+        await storeService.InsertStoreAsync(new Store
+        {
+            Name = "Coverage Store",
+            Url = "http://coverage.local/",
+            Hosts = "coverage.local",
+            SslEnabled = source.SslEnabled,
+            DefaultLanguageId = source.DefaultLanguageId,
+            DisplayOrder = 99,
+            CompanyName = source.CompanyName ?? "Coverage",
+            CompanyAddress = source.CompanyAddress,
+            CompanyPhoneNumber = source.CompanyPhoneNumber,
+            CompanyVat = source.CompanyVat,
+            DefaultTitle = source.DefaultTitle,
+            DefaultMetaDescription = source.DefaultMetaDescription,
+            DefaultMetaKeywords = source.DefaultMetaKeywords,
+            HomepageTitle = source.HomepageTitle,
+            HomepageDescription = source.HomepageDescription
+        });
+    }
+
+    public async Task SetAdminStoreScopeAsync(int storeId)
+    {
         var customer = await _services.GetRequiredService<IWorkContext>().GetCurrentCustomerAsync();
         await _services.GetRequiredService<IGenericAttributeService>()
-            .SaveAttributeAsync(customer, NopCustomerDefaults.AdminAreaStoreScopeConfigurationAttribute, scopeStore.Id);
+            .SaveAttributeAsync(customer, NopCustomerDefaults.AdminAreaStoreScopeConfigurationAttribute, storeId);
 
         if (_services.GetService<IStoreContext>() is WebStoreContext webStore)
         {
@@ -118,6 +130,13 @@ public sealed class WebCoverageHarness
                 .GetField("_cachedStore", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?.SetValue(webStore, null);
         }
+    }
+
+    public async Task EnableAdminStoreScopeAsync()
+    {
+        await EnsureSecondStoreAsync();
+        var stores = await _services.GetRequiredService<IStoreService>().GetAllStoresAsync();
+        await SetAdminStoreScopeAsync(stores.Last().Id);
     }
 
     public async Task EnableCheckoutTestPluginsAsync()
@@ -499,47 +518,62 @@ public sealed class WebCoverageHarness
                     continue;
 
                 TypesCreated++;
-                AttachMvc(instance);
-                FillRazorModelGraph(instance);
 
-                if (instance is RazorPageBase razorPage)
-                {
-                    razorPage.Layout = null;
-                    razorPage.HtmlEncoder ??= HtmlEncoder.Default;
-                    var diagnostic = razorPage.GetType().GetProperty("DiagnosticSource");
-                    if (diagnostic?.CanWrite == true && diagnostic.GetValue(razorPage) == null
-                        && diagnostic.PropertyType.IsAssignableFrom(typeof(System.Diagnostics.DiagnosticListener)))
-                    {
-                        diagnostic.SetValue(razorPage, new System.Diagnostics.DiagnosticListener("Nop.Web.Coverage"));
-                    }
-                }
-
-                var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
-                if (execute == null)
-                    continue;
-
+                var http = _services.GetRequiredService<IHttpContextAccessor>().HttpContext
+                           ?? throw new InvalidOperationException("HttpContext is not available");
+                var previousServices = http.RequestServices;
+                http.RequestServices = new CompositeServiceProvider(MvcServices.Value, _services);
                 try
                 {
-                    var raw = execute.Invoke(instance, null);
-                    if (raw is Task task)
-                    {
-                        var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(3)));
-                        if (finished != task)
-                        {
-                            MethodsFailed++;
-                            continue;
-                        }
+                    AttachMvc(instance);
+                    FillRazorModelGraph(instance);
 
-                        await task;
+                    if (instance is RazorPageBase razorPage)
+                    {
+                        razorPage.Layout = null;
+                        razorPage.HtmlEncoder ??= HtmlEncoder.Default;
+                        try
+                        {
+                            MvcServices.Value.GetService<IRazorPageActivator>()
+                                ?.Activate(razorPage, razorPage.ViewContext);
+                        }
+                        catch
+                        {
+                            // continue with manually attached helpers
+                        }
                     }
 
-                    MethodsInvoked++;
+                    var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
+                    if (execute == null)
+                        continue;
+
+                    try
+                    {
+                        var raw = execute.Invoke(instance, null);
+                        if (raw is Task task)
+                        {
+                            var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(3)));
+                            if (finished != task)
+                            {
+                                MethodsFailed++;
+                                continue;
+                            }
+
+                            await task;
+                        }
+
+                        MethodsInvoked++;
+                    }
+                    catch (Exception ex)
+                    {
+                        MethodsFailed++;
+                        if (Failures.Count < 40)
+                            Failures.Add($"{type.Name}: {ex.GetBaseException().GetType().Name}: {ex.GetBaseException().Message}");
+                    }
                 }
-                catch (Exception ex)
+                finally
                 {
-                    MethodsFailed++;
-                    if (Failures.Count < 40)
-                        Failures.Add($"{type.Name}: {ex.GetBaseException().GetType().Name}: {ex.GetBaseException().Message}");
+                    http.RequestServices = previousServices;
                 }
             }
             catch (Exception ex)
@@ -668,7 +702,10 @@ public sealed class WebCoverageHarness
     {
         var http = _services.GetRequiredService<IHttpContextAccessor>().HttpContext
                    ?? throw new InvalidOperationException("HttpContext is not available");
-        http.RequestServices = _services;
+        if (instance is RazorPageBase)
+            http.RequestServices = new CompositeServiceProvider(MvcServices.Value, _services);
+        else
+            http.RequestServices = _services;
 
         var routeData = http.GetRouteData() ?? new RouteData();
         var actionContext = new ActionContext(http, routeData, new ControllerActionDescriptor());
@@ -1286,6 +1323,35 @@ public sealed class WebCoverageHarness
                 return Array.CreateInstance(type.GetElementType()!, 0);
             if (type.IsClass && type.GetConstructor(Type.EmptyTypes) != null)
                 return Activator.CreateInstance(type);
+            return null;
+        }
+    }
+
+    private sealed class CompositeServiceProvider : IServiceProvider
+    {
+        private readonly IServiceProvider[] _providers;
+
+        public CompositeServiceProvider(params IServiceProvider[] providers)
+        {
+            _providers = providers;
+        }
+
+        public object GetService(Type serviceType)
+        {
+            foreach (var provider in _providers)
+            {
+                try
+                {
+                    var service = provider.GetService(serviceType);
+                    if (service != null)
+                        return service;
+                }
+                catch
+                {
+                    // try the next provider
+                }
+            }
+
             return null;
         }
     }
