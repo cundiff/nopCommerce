@@ -1025,6 +1025,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         var taxSettings = GetService<TaxSettings>();
         var shoppingCartSettings = GetService<ShoppingCartSettings>();
         var orderSettings = GetService<OrderSettings>();
+        var privateMessageSettings = GetService<PrivateMessageSettings>();
         var vendorSettings = GetService<global::Nop.Core.Domain.Vendors.VendorSettings>();
 
         var customerSnap = Snapshot(customerSettings);
@@ -1033,6 +1034,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         var cartSnap = Snapshot(shoppingCartSettings);
         var orderSnap = Snapshot(orderSettings);
         var vendorSnap = Snapshot(vendorSettings);
+        var pmSnap = Snapshot(privateMessageSettings);
 
         customerSettings.GenderEnabled = true;
         customerSettings.FirstNameEnabled = true;
@@ -1068,6 +1070,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         vendorSettings.VendorsBlockItemsToDisplay = 1;
         vendorSettings.AllowSearchByVendor = true;
         vendorSettings.AllowCustomersToApplyForVendorAccount = true;
+        privateMessageSettings.AllowPrivateMessages = true;
         orderSettings.OnePageCheckoutEnabled = true;
         orderSettings.DisableOrderCompletedPage = false;
         orderSettings.AutoUpdateOrderTotalsOnEditingOrder = false;
@@ -1077,6 +1080,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         await settingService.SaveSettingAsync(shoppingCartSettings);
         await settingService.SaveSettingAsync(orderSettings);
         await settingService.SaveSettingAsync(vendorSettings);
+        await settingService.SaveSettingAsync(privateMessageSettings);
 
         try
         {
@@ -1744,6 +1748,21 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             await Try(async () => await harness.InvokeInstanceMethodAsync(adminCustomerStats, "LoadCustomerStatistics", "week"));
             await Try(async () => await harness.InvokeInstanceMethodAsync(orderController, "LoadOrderStatistics", "today"));
 
+            var pmController = harness.CreateController<global::Nop.Web.Controllers.PrivateMessagesController>();
+            await Try(async () =>
+            {
+                var others = await GetService<ICustomerService>().GetAllCustomersAsync(pageIndex: 0, pageSize: 10);
+                var to = others.FirstOrDefault(c => c.Id != customer.Id);
+                if (to == null)
+                    return;
+                var pmFactory = GetService<global::Nop.Web.Factories.IPrivateMessagesModelFactory>();
+                var send = await pmFactory.PrepareSendPrivateMessageModelAsync(to, null);
+                send.Subject = "Coverage PM";
+                send.Message = "Coverage private message";
+                pmController.ModelState.Clear();
+                await pmController.SendPM(send);
+            });
+
             var customWishlistService = GetService<ICustomWishlistService>();
             await Try(async () =>
             {
@@ -1818,12 +1837,14 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             Restore(shoppingCartSettings, cartSnap);
             Restore(orderSettings, orderSnap);
             Restore(vendorSettings, vendorSnap);
+            Restore(privateMessageSettings, pmSnap);
             await settingService.SaveSettingAsync(customerSettings);
             await settingService.SaveSettingAsync(catalogSettings);
             await settingService.SaveSettingAsync(taxSettings);
             await settingService.SaveSettingAsync(shoppingCartSettings);
             await settingService.SaveSettingAsync(orderSettings);
             await settingService.SaveSettingAsync(vendorSettings);
+            await settingService.SaveSettingAsync(privateMessageSettings);
             var restored = await GetService<ICustomerService>().GetCustomerByEmailAsync(NopTestsDefaults.AdminEmail);
             if (restored != null)
                 await GetService<IWorkContext>().SetCurrentCustomerAsync(restored);

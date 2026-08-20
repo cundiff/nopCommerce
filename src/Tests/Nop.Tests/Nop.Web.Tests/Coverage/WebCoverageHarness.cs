@@ -462,7 +462,7 @@ public sealed class WebCoverageHarness
 
             foreach (var group in methods.GroupBy(m => m.Name))
             {
-                if (ShouldSkipMethodName(group.Key) || IsCreateLike(group.Key))
+                if (ShouldSkipMethodName(group.Key))
                     continue;
 
                 var posts = group.Where(m =>
@@ -727,7 +727,8 @@ public sealed class WebCoverageHarness
     {
         try
         {
-            if (instance is Controller controller && IsLikelyMutating(method))
+            if (instance is Controller controller && IsLikelyMutating(method)
+                && instance.GetType().Name is "SettingController" or "InstallController" or "PluginController")
                 controller.ModelState.AddModelError("_coverage", "do not persist");
 
             var args = method.GetParameters().Select(p =>
