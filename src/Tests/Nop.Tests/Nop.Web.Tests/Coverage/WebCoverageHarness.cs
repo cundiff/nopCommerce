@@ -22,6 +22,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
 using Nop.Core;
+using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Customers;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
@@ -29,6 +30,7 @@ using Nop.Core.Domain.Shipping;
 using Nop.Core.Domain.Stores;
 using Nop.Core.Events;
 using Nop.Data;
+using Nop.Services.Attributes;
 using Nop.Services.Catalog;
 using Nop.Services.Common;
 using Nop.Services.Configuration;
@@ -180,8 +182,171 @@ public sealed class WebCoverageHarness
         await settings.SaveSettingAsync(payment);
     }
 
+    public async Task<Product> EnsurePlainProductAsync()
+    {
+        var productService = _services.GetRequiredService<IProductService>();
+        var attributeService = _services.GetRequiredService<IProductAttributeService>();
+        foreach (var candidate in await productService.SearchProductsAsync(pageSize: 80))
+        {
+            if (candidate.ProductType != ProductType.SimpleProduct)
+                continue;
+            if (candidate.CustomerEntersPrice || candidate.IsRental || candidate.OrderMinimumQuantity > 1)
+                continue;
+            if (!string.IsNullOrEmpty(candidate.AllowedQuantities))
+                continue;
+            if ((await attributeService.GetProductAttributeMappingsByProductIdAsync(candidate.Id)).Count > 0)
+                continue;
+            return candidate;
+        }
+
+        var source = (await productService.SearchProductsAsync(pageSize: 1)).First();
+        var product = new Product
+        {
+            Name = "Coverage Plain Product",
+            ShortDescription = source.ShortDescription,
+            FullDescription = source.FullDescription,
+            ProductType = ProductType.SimpleProduct,
+            VisibleIndividually = true,
+            ProductTemplateId = source.ProductTemplateId,
+            AllowCustomerReviews = true,
+            Published = true,
+            Sku = $"COV{Guid.NewGuid():N}"[..12],
+            Price = 19.99m,
+            IsShipEnabled = true,
+            ManageInventoryMethod = ManageInventoryMethod.DontManageStock,
+            StockQuantity = 1000,
+            OrderMinimumQuantity = 1,
+            OrderMaximumQuantity = 10000,
+            TaxCategoryId = source.TaxCategoryId,
+            Weight = 1,
+            Length = 1,
+            Width = 1,
+            Height = 1,
+            CreatedOnUtc = DateTime.UtcNow,
+            UpdatedOnUtc = DateTime.UtcNow,
+            RecurringCycleLength = 100,
+            RecurringTotalCycles = 10,
+            RentalPriceLength = 1
+        };
+        await productService.InsertProductAsync(product);
+        return product;
+    }
+
+    public async Task EnsurePlainProductInCartAsync()
+    {
+        var product = await EnsurePlainProductAsync();
+        var customer = await _services.GetRequiredService<IWorkContext>().GetCurrentCustomerAsync();
+        var store = await _services.GetRequiredService<IStoreContext>().GetCurrentStoreAsync();
+        try
+        {
+            await _services.GetRequiredService<IShoppingCartService>()
+                .AddToCartAsync(customer, product, ShoppingCartType.ShoppingCart, store.Id,
+                    quantity: 1, addRequiredProducts: false);
+        }
+        catch
+        {
+            // already in the cart
+        }
+    }
+
+    public async Task SeedCoverageAttributesAsync()
+    {
+        var productService = _services.GetRequiredService<IProductService>();
+        var attributeService = _services.GetRequiredService<IProductAttributeService>();
+        var catalogAttributes = await attributeService.GetAllProductAttributesAsync();
+        if (catalogAttributes.Count == 0)
+            return;
+
+        var host = (await productService.SearchProductsAsync(pageSize: 20))
+            .FirstOrDefault(p => p.Name != "Coverage Plain Product")
+            ?? (await productService.SearchProductsAsync(pageSize: 1)).First();
+
+        var existing = await attributeService.GetProductAttributeMappingsByProductIdAsync(host.Id);
+        if (!existing.Any(m => m.AttributeControlType == AttributeControlType.FileUpload))
+        {
+            await attributeService.InsertProductAttributeMappingAsync(new ProductAttributeMapping
+            {
+                ProductId = host.Id,
+                ProductAttributeId = catalogAttributes[0].Id,
+                AttributeControlType = AttributeControlType.FileUpload,
+                IsRequired = false,
+                DisplayOrder = 90,
+                ValidationFileMaximumSize = 2048
+            });
+        }
+
+        var checkoutService = _services.GetRequiredService<IAttributeService<CheckoutAttribute, CheckoutAttributeValue>>();
+        var checkoutAttributes = await checkoutService.GetAllAttributesAsync();
+        foreach (AttributeControlType control in Enum.GetValues<AttributeControlType>())
+        {
+            if (checkoutAttributes.Any(a => a.AttributeControlType == control))
+                continue;
+
+            var created = new CheckoutAttribute
+            {
+                Name = $"Coverage checkout {control}",
+                AttributeControlType = control,
+                IsRequired = false,
+                DisplayOrder = 80 + (int)control
+            };
+            await checkoutService.InsertAttributeAsync(created);
+            if (created.ShouldHaveValues)
+            {
+                await checkoutService.InsertAttributeValueAsync(new CheckoutAttributeValue
+                {
+                    AttributeId = created.Id,
+                    Name = "Coverage",
+                    IsPreSelected = true,
+                    DisplayOrder = 1
+                });
+            }
+        }
+    }
+
+    public void ApplyRequestForm(IDictionary<string, string> values = null, bool withFile = true,
+        IEnumerable<(string name, string fileName)> extraFiles = null)
+    {
+        var http = _services.GetRequiredService<IHttpContextAccessor>().HttpContext;
+        if (http == null)
+            return;
+
+        http.Request.ContentType = "multipart/form-data; boundary=----coverage";
+        http.Request.QueryString = new QueryString("?q=coverage");
+        try
+        {
+            http.Request.Form = CreateForm(values, withFile, extraFiles);
+        }
+        catch
+        {
+            // request form can already be read
+        }
+    }
+
+    public async Task InvokeInstanceMethodAsync(object instance, string name, params object[] args)
+    {
+        var methods = instance.GetType().GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Where(m => m.Name == name && !m.Name.Contains('<', StringComparison.Ordinal))
+            .ToList();
+        var method = methods.FirstOrDefault(m => m.GetParameters().Length == args.Length) ?? methods.FirstOrDefault();
+        if (method == null)
+            return;
+
+        if (args.Length != method.GetParameters().Length)
+        {
+            var parameters = method.GetParameters();
+            var filled = new object[parameters.Length];
+            for (var i = 0; i < parameters.Length; i++)
+                filled[i] = i < args.Length ? args[i] : CreateArg(parameters[i].ParameterType, parameters[i].Name, instance.GetType());
+            args = filled;
+        }
+
+        await TryInvokeAsync(instance, method, args, DefaultTimeout);
+    }
+
     public async Task SeedShoppingCartAsync()
     {
+        await EnsurePlainProductInCartAsync();
+
         var workContext = _services.GetRequiredService<IWorkContext>();
         var customer = await workContext.GetCurrentCustomerAsync();
         var store = await _services.GetRequiredService<IStoreContext>().GetCurrentStoreAsync();
@@ -235,9 +400,13 @@ public sealed class WebCoverageHarness
         typeof(WebWorkContext).GetField("_cachedTaxDisplayType", flags)?.SetValue(workContext, null);
     }
 
-    public FormCollection CreateForm(IDictionary<string, string> values = null, bool withFile = false)
+    public FormCollection CreateForm(IDictionary<string, string> values = null, bool withFile = false,
+        IEnumerable<(string name, string fileName)> extraFiles = null)
     {
-        var fields = new Dictionary<string, StringValues>(StringComparer.OrdinalIgnoreCase);
+        var fields = new Dictionary<string, StringValues>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["q"] = "coverage"
+        };
         var addressId = GetEntityIds("Address").FirstOrDefault();
         if (addressId > 0)
         {
@@ -254,6 +423,11 @@ public sealed class WebCoverageHarness
         var files = new FormFileCollection();
         if (withFile)
             files.Add(CreateFormFile());
+        if (extraFiles != null)
+        {
+            foreach (var (name, fileName) in extraFiles)
+                files.Add(CreateFormFile(name, fileName));
+        }
 
         return new FormCollection(fields, files);
     }
@@ -431,6 +605,11 @@ public sealed class WebCoverageHarness
     {
         await EnableCheckoutTestPluginsAsync();
         await SeedShoppingCartAsync();
+        await SeedCoverageAttributesAsync();
+
+        var orderSettings = _services.GetRequiredService<OrderSettings>();
+        orderSettings.OnePageCheckoutEnabled = true;
+        await _services.GetRequiredService<ISettingService>().SaveSettingAsync(orderSettings);
 
         var checkoutType = typeof(global::Nop.Web.Controllers.CheckoutController);
         object checkout;
@@ -512,7 +691,6 @@ public sealed class WebCoverageHarness
             // keep the test plugin option string
         }
 
-        var orderSettings = _services.GetRequiredService<OrderSettings>();
         var previousOpc = orderSettings.OnePageCheckoutEnabled;
         orderSettings.OnePageCheckoutEnabled = false;
         try
@@ -800,9 +978,30 @@ public sealed class WebCoverageHarness
         else
             http.RequestServices = _services;
 
+        http.Request.ContentType = "multipart/form-data; boundary=----coverage";
+        http.Request.QueryString = new QueryString("?q=coverage");
+        try
+        {
+            http.Request.Form = CreateForm(withFile: true);
+        }
+        catch
+        {
+            // request form can already be read
+        }
+
         var routeData = http.GetRouteData() ?? new RouteData();
         if (routeData.Routers.Count == 0)
             routeData.Routers.Add(DummyRouter.Instance);
+        var typeName = instance.GetType().Name;
+        if (typeName.Contains("Views_", StringComparison.Ordinal) || typeName.Contains('_'))
+        {
+            var parts = typeName.Split('_', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2)
+            {
+                routeData.Values["action"] ??= parts[^1];
+                routeData.Values["controller"] ??= parts[^2];
+            }
+        }
         var actionContext = new ActionContext(http, routeData, new ControllerActionDescriptor());
         var url = _services.GetRequiredService<IUrlHelperFactory>().GetUrlHelper(actionContext);
         var tempData = _services.GetRequiredService<ITempDataDictionaryFactory>().GetTempData(http);
