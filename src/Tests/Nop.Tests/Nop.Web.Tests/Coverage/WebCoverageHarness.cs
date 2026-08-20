@@ -1004,7 +1004,14 @@ public sealed class WebCoverageHarness
                 routeData.Values["controller"] ??= parts[^2];
             }
         }
-        var actionContext = new ActionContext(http, routeData, new ControllerActionDescriptor());
+
+        var actionDescriptor = new ControllerActionDescriptor
+        {
+            ControllerName = routeData.Values["controller"]?.ToString() ?? "Product",
+            ActionName = routeData.Values["action"]?.ToString() ?? "List",
+            ControllerTypeInfo = typeof(global::Nop.Tests.Nop.Services.Tests.Payments.TestPaymentMethod).GetTypeInfo()
+        };
+        var actionContext = new ActionContext(http, routeData, actionDescriptor);
         var url = _services.GetRequiredService<IUrlHelperFactory>().GetUrlHelper(actionContext);
         var tempData = _services.GetRequiredService<ITempDataDictionaryFactory>().GetTempData(http);
 

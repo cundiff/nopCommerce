@@ -1037,6 +1037,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         var shoppingCartSettings = GetService<ShoppingCartSettings>();
         var orderSettings = GetService<OrderSettings>();
         var privateMessageSettings = GetService<PrivateMessageSettings>();
+        var gdprSettings = GetService<global::Nop.Core.Domain.Gdpr.GdprSettings>();
         var vendorSettings = GetService<global::Nop.Core.Domain.Vendors.VendorSettings>();
 
         var customerSnap = Snapshot(customerSettings);
@@ -1046,6 +1047,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         var orderSnap = Snapshot(orderSettings);
         var vendorSnap = Snapshot(vendorSettings);
         var pmSnap = Snapshot(privateMessageSettings);
+        var gdprSnap = Snapshot(gdprSettings);
 
         customerSettings.GenderEnabled = true;
         customerSettings.FirstNameEnabled = true;
@@ -1082,6 +1084,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         vendorSettings.AllowSearchByVendor = true;
         vendorSettings.AllowCustomersToApplyForVendorAccount = true;
         privateMessageSettings.AllowPrivateMessages = true;
+        gdprSettings.GdprEnabled = false;
         orderSettings.OnePageCheckoutEnabled = true;
         orderSettings.DisableOrderCompletedPage = false;
         orderSettings.AutoUpdateOrderTotalsOnEditingOrder = false;
@@ -1092,6 +1095,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         await settingService.SaveSettingAsync(orderSettings);
         await settingService.SaveSettingAsync(vendorSettings);
         await settingService.SaveSettingAsync(privateMessageSettings);
+        await settingService.SaveSettingAsync(gdprSettings);
 
         try
         {
@@ -1780,6 +1784,20 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                 await pmController.SendPM(send);
             });
 
+            var commonFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ICommonModelFactory>();
+            await Try(async () => (await commonFactory.PrepareCommonStatisticsModelAsync()).Should().NotBeNull());
+            await Try(async () => (await commonFactory.PrepareSystemWarningModelsAsync()).Should().NotBeNull());
+            await Try(async () => (await commonFactory.PrepareSystemInfoModelAsync(new global::Nop.Web.Areas.Admin.Models.Common.SystemInfoModel())).Should().NotBeNull());
+            await Try(async () => (await commonFactory.PrepareMaintenanceModelAsync(new global::Nop.Web.Areas.Admin.Models.Common.MaintenanceModel())).Should().NotBeNull());
+            await Try(async () =>
+            {
+                var search = new global::Nop.Web.Areas.Admin.Models.Common.UrlRecordSearchModel();
+                search.SetGridPageSize();
+                await commonFactory.PrepareUrlRecordSearchModelAsync(search);
+                (await commonFactory.PrepareUrlRecordListModelAsync(search)).Should().NotBeNull();
+            });
+            await Try(async () => await commonFactory.PreparePluginsWarningModelAsync([]));
+
             var customWishlistService = GetService<ICustomWishlistService>();
             await Try(async () =>
             {
@@ -1855,6 +1873,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             Restore(orderSettings, orderSnap);
             Restore(vendorSettings, vendorSnap);
             Restore(privateMessageSettings, pmSnap);
+            Restore(gdprSettings, gdprSnap);
             await settingService.SaveSettingAsync(customerSettings);
             await settingService.SaveSettingAsync(catalogSettings);
             await settingService.SaveSettingAsync(taxSettings);
@@ -1862,6 +1881,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             await settingService.SaveSettingAsync(orderSettings);
             await settingService.SaveSettingAsync(vendorSettings);
             await settingService.SaveSettingAsync(privateMessageSettings);
+            await settingService.SaveSettingAsync(gdprSettings);
             var restored = await GetService<ICustomerService>().GetCustomerByEmailAsync(NopTestsDefaults.AdminEmail);
             if (restored != null)
                 await GetService<IWorkContext>().SetCurrentCustomerAsync(restored);
