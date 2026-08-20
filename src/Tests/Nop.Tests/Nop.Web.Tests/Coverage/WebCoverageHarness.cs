@@ -316,8 +316,8 @@ public sealed class WebCoverageHarness
         await Call("OpcSaveShippingMethod", "test", form);
         await Call("PaymentMethod");
         var paymentModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel), "model", checkoutType);
-        await Call("SelectPaymentMethod", "Payments.CheckMoneyOrder", paymentModel);
-        await Call("OpcSavePaymentMethod", "Payments.CheckMoneyOrder", paymentModel);
+        await Call("SelectPaymentMethod", "Payments.TestMethod", paymentModel);
+        await Call("OpcSavePaymentMethod", "Payments.TestMethod", paymentModel);
         await Call("PaymentInfo");
         await Call("EnterPaymentInfo", form);
         await Call("OpcSavePaymentInfo", form);
@@ -591,7 +591,11 @@ public sealed class WebCoverageHarness
                || name.Contains("Restart", StringComparison.OrdinalIgnoreCase)
                || name.Contains("Sitemap", StringComparison.OrdinalIgnoreCase)
                || name.Contains("ConfirmOrder", StringComparison.OrdinalIgnoreCase)
-               || name.Equals("OpcConfirmOrder", StringComparison.Ordinal);
+               || name.Equals("OpcConfirmOrder", StringComparison.Ordinal)
+               || name.Contains("ChangeEncryptionKey", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("UploadPlugin", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("Install", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("ReloadList", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsCreateLike(string name)
