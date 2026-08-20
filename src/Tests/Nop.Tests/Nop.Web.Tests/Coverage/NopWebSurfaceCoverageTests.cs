@@ -899,8 +899,6 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                         && t.GetMethod("ExecuteAsync") != null);
         await harness.ExerciseRazorPagesAsync(types);
         TestContext.WriteLine($"Razor: created={harness.TypesCreated} invoked={harness.MethodsInvoked} failed={harness.MethodsFailed}");
-        if (harness.Failures.Count > 0)
-            TestContext.WriteLine("Razor failures: " + string.Join(" | ", harness.Failures.Take(15)));
         harness.TypesCreated.Should().BeGreaterThan(0);
     }
 
@@ -1098,6 +1096,26 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                 (await productFactory.PrepareProductListModelAsync(search)).Should().NotBeNull();
             });
 
+            var attributeService = GetService<IProductAttributeService>();
+            foreach (var sample in (await GetService<IProductService>().SearchProductsAsync(pageSize: 30)).Take(15))
+            {
+                var mappings = await attributeService.GetProductAttributeMappingsByProductIdAsync(sample.Id);
+                if (mappings.Count == 0)
+                    continue;
+
+                await Try(async () =>
+                {
+                    var search = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductAttributeMappingSearchModel
+                    {
+                        ProductId = sample.Id
+                    };
+                    search.SetGridPageSize();
+                    productController.ModelState.Clear();
+                    await productController.ProductAttributeMappingList(search);
+                    (await productFactory.PrepareProductAttributeMappingListModelAsync(search, sample)).Should().NotBeNull();
+                });
+            }
+
             var adminCustomer = await GetService<IWorkContext>().GetCurrentCustomerAsync();
             var customerFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ICustomerModelFactory>();
             var adminCustomerController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.CustomerController>();
@@ -1122,6 +1140,15 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                 model.VatNumber = "GB123";
                 adminCustomerController.ModelState.Clear();
                 await adminCustomerController.Edit(model, true, harness.CreateForm());
+            });
+            await Try(async () =>
+            {
+                var model = await customerFactory.PrepareCustomerModelAsync(null, adminCustomer);
+                model.SendEmail.Subject = "Coverage subject";
+                model.SendEmail.Body = "Coverage body";
+                model.SendEmail.SendImmediately = true;
+                adminCustomerController.ModelState.Clear();
+                await adminCustomerController.SendEmail(model);
             });
 
             var publicCustomerFactory = GetService<global::Nop.Web.Factories.ICustomerModelFactory>();
@@ -1203,8 +1230,44 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             });
             await Try(async () => await checkout.Confirm());
             await Try(async () => await checkout.ConfirmOrder(true));
-            await Try(async () => await checkout.OpcConfirmOrder(true));
             await Try(async () => await checkout.Completed(null));
+
+            var previousOpc = orderSettings.OnePageCheckoutEnabled;
+            orderSettings.OnePageCheckoutEnabled = true;
+            await settingService.SaveSettingAsync(orderSettings);
+            try
+            {
+                var existingAddress = (await GetService<ICustomerService>().GetAddressesByCustomerIdAsync(customer.Id)).FirstOrDefault();
+                await Try(async () =>
+                {
+                    await GetService<IGenericAttributeService>().SaveAttributeAsync(customer,
+                        NopCustomerDefaults.SelectedPaymentMethodAttribute, "Payments.TestMethod", store.Id);
+                    var billingModel = new global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel();
+                    await checkoutFactory.PrepareBillingAddressModelAsync(billingModel, cart, prePopulateNewAddressWithCustomerFields: true);
+                    if (existingAddress != null)
+                        billingModel.BillingNewAddress.Id = existingAddress.Id;
+                    checkout.ModelState.Clear();
+                    await checkout.SaveEditBillingAddress(billingModel, harness.CreateForm(), true);
+                });
+                await Try(async () =>
+                {
+                    var shippingModel = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel();
+                    await checkoutFactory.PrepareShippingAddressModelAsync(shippingModel, cart, prePopulateNewAddressWithCustomerFields: true);
+                    if (existingAddress != null)
+                        shippingModel.ShippingNewAddress.Id = existingAddress.Id;
+                    checkout.ModelState.Clear();
+                    await checkout.SaveEditShippingAddress(shippingModel, harness.CreateForm(), true);
+                });
+                await Try(async () => await checkout.OpcSavePaymentMethod("Payments.TestMethod",
+                    new global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel()));
+                await Try(async () => await checkout.OpcConfirmOrder(true));
+                await Try(async () => await checkout.ConfirmOrder(true));
+            }
+            finally
+            {
+                orderSettings.OnePageCheckoutEnabled = previousOpc;
+                await settingService.SaveSettingAsync(orderSettings);
+            }
 
             var shoppingCart = harness.CreateController<global::Nop.Web.Controllers.ShoppingCartController>();
             var wishlist = await GetService<IShoppingCartService>()

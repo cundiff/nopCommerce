@@ -1,7 +1,10 @@
 using System.Collections;
+using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.Encodings.Web;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Html;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -14,6 +17,7 @@ using Microsoft.AspNetCore.Mvc.Razor;
 using Microsoft.AspNetCore.Mvc.ViewComponents;
 using Microsoft.AspNetCore.Mvc.ViewEngines;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
+using Microsoft.AspNetCore.Razor.TagHelpers;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
@@ -62,12 +66,13 @@ public sealed class WebCoverageHarness
         services.AddControllersWithViews()
             .AddApplicationPart(typeof(global::Nop.Web.Controllers.HomeController).Assembly)
             .AddApplicationPart(typeof(NopRazorPage<>).Assembly);
-        // Real IHtmlGenerator/IHtmlHelper throw on missing routes and editor templates.
-        // Stub them so compiled views can run past the first asp-/nop- tag helper.
         services.AddSingleton<IHtmlGenerator, CoverageHtmlGenerator>();
+        services.AddSingleton<IAntiforgery, CoverageAntiforgery>();
         services.AddTransient(typeof(IHtmlHelper), _ => EmptyProxy.Create(typeof(IHtmlHelper)));
+        services.AddSingleton<ITagHelperFactory, CoverageTagHelperFactory>();
         var provider = services.BuildServiceProvider();
         _ = provider.GetRequiredService<IHtmlGenerator>();
+        _ = provider.GetRequiredService<ITagHelperFactory>();
         return provider;
     }
 
@@ -619,6 +624,8 @@ public sealed class WebCoverageHarness
                         // keep the helpers attached in AttachMvc
                     }
 
+                    AttachRazorRuntime(razorPage);
+
                     // Real IHtmlHelper/IViewComponentHelper try to locate partials and
                     // view components via the MVC view engine. Stub them so this page's
                     // own ExecuteAsync can finish; compiled partials are invoked separately.
@@ -837,7 +844,30 @@ public sealed class WebCoverageHarness
             razorPage.ViewContext = viewContext;
             razorPage.Layout = null;
             razorPage.HtmlEncoder ??= HtmlEncoder.Default;
+            AttachRazorRuntime(razorPage);
             ActivateRazorInjects(instance, viewContext);
+        }
+    }
+
+    private static void AttachRazorRuntime(RazorPageBase page)
+    {
+        var mvc = MvcServices.Value;
+        var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var razorType = typeof(RazorPageBase);
+        razorType.GetField("_tagHelperFactory", flags)?.SetValue(page, mvc.GetService<ITagHelperFactory>());
+        var bufferField = razorType.GetField("_bufferScope", flags);
+        if (bufferField != null)
+            bufferField.SetValue(page, mvc.GetService(bufferField.FieldType));
+        page.DiagnosticSource ??= mvc.GetService<DiagnosticSource>();
+        page.HtmlEncoder ??= HtmlEncoder.Default;
+        try
+        {
+            var url = mvc.GetService<IUrlHelperFactory>()?.GetUrlHelper(page.ViewContext)
+                      ?? EmptyProxy.Create(typeof(IUrlHelper), page.ViewContext);
+            razorType.GetField("_urlHelper", flags)?.SetValue(page, url);
+        }
+        catch
+        {
         }
     }
 
@@ -1645,6 +1675,45 @@ public sealed class WebCoverageHarness
                 return Activator.CreateInstance(type);
             return null;
         }
+    }
+
+    private sealed class CoverageTagHelperFactory : ITagHelperFactory
+    {
+        public TTagHelper CreateTagHelper<TTagHelper>(ViewContext context) where TTagHelper : ITagHelper
+        {
+            var services = context?.HttpContext?.RequestServices;
+            TTagHelper helper;
+            try
+            {
+                helper = services != null
+                    ? ActivatorUtilities.CreateInstance<TTagHelper>(services)
+                    : (TTagHelper)Activator.CreateInstance(typeof(TTagHelper));
+            }
+            catch
+            {
+                helper = (TTagHelper)RuntimeHelpers.GetUninitializedObject(typeof(TTagHelper));
+            }
+
+            if (helper is IViewContextAware aware && context != null)
+            {
+                try { aware.Contextualize(context); }
+                catch { }
+            }
+
+            return helper;
+        }
+    }
+
+    private sealed class CoverageAntiforgery : IAntiforgery
+    {
+        private static AntiforgeryTokenSet Tokens()
+            => new("coverage-token", "coverage-cookie", "__RequestVerificationToken", "RequestVerificationToken");
+
+        public AntiforgeryTokenSet GetAndStoreTokens(HttpContext httpContext) => Tokens();
+        public AntiforgeryTokenSet GetTokens(HttpContext httpContext) => Tokens();
+        public Task<bool> IsRequestValidAsync(HttpContext httpContext) => Task.FromResult(true);
+        public Task ValidateRequestAsync(HttpContext httpContext) => Task.CompletedTask;
+        public void SetCookieTokenAndHeader(HttpContext httpContext) { }
     }
 
     private sealed class CoverageHtmlGenerator : IHtmlGenerator
