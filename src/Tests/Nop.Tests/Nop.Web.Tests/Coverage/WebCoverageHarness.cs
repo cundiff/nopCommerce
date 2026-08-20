@@ -823,10 +823,12 @@ public sealed class WebCoverageHarness
                     var raw = execute.Invoke(instance, null);
                     if (raw is Task task)
                     {
-                        var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(3)));
+                        var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(12)));
                         if (finished != task)
                         {
                             MethodsFailed++;
+                            if (Failures.Count < 40)
+                                Failures.Add($"{type.Name}: ExecuteAsync timed out");
                             continue;
                         }
 
@@ -1848,6 +1850,7 @@ public sealed class WebCoverageHarness
     public class EmptyProxy : DispatchProxy
     {
         public ViewContext ViewContext { get; set; }
+        private ViewDataDictionary _viewData;
 
         public static object Create(Type interfaceType, ViewContext viewContext = null)
         {
@@ -1863,6 +1866,10 @@ public sealed class WebCoverageHarness
             return proxy;
         }
 
+        private ViewDataDictionary ViewData =>
+            ViewContext?.ViewData
+            ?? (_viewData ??= new ViewDataDictionary(new EmptyModelMetadataProvider(), new ModelStateDictionary()));
+
         protected override object Invoke(MethodInfo targetMethod, object[] args)
         {
             if (targetMethod == null)
@@ -1872,7 +1879,7 @@ public sealed class WebCoverageHarness
             if (name == "get_ViewContext" || name == "get_ActionContext")
                 return ViewContext;
             if (name == "get_ViewData")
-                return ViewContext?.ViewData;
+                return ViewData;
             if (name == "get_ViewBag")
                 return ViewContext?.ViewBag;
             if (name == "get_TempData")

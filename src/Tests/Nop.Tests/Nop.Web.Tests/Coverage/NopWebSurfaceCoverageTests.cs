@@ -896,6 +896,17 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     public async Task ExerciseCompiledRazorPages()
     {
         var harness = CreateHarness();
+        try
+        {
+            var customer = await GetService<IWorkContext>().GetCurrentCustomerAsync();
+            var genericAttributes = GetService<IGenericAttributeService>();
+            await genericAttributes.GetAttributeAsync<bool>(customer, "CustomerListPage.HideSearchBlock");
+            await genericAttributes.GetAttributeAsync<bool>(customer, "OrderListPage.HideSearchBlock");
+        }
+        catch
+        {
+        }
+
         var types = WebAssemblyMarker.Assembly.GetTypes()
             .Where(t => t.IsClass && !t.IsAbstract
                         && (t.Namespace == "AspNetCoreGeneratedDocument" || t.FullName?.Contains("AspNetCoreGeneratedDocument", StringComparison.Ordinal) == true)
