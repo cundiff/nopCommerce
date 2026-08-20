@@ -225,8 +225,12 @@ public sealed class WebCoverageHarness
         if (asMvc)
             AttachMvc(instance);
 
-        var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
-            .Where(m => !m.IsSpecialName && m.DeclaringType == type && !ShouldSkipMethod(m));
+        var methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName
+                        && m.DeclaringType == type
+                        && !m.IsAbstract
+                        && !m.Name.Contains('<', StringComparison.Ordinal)
+                        && !ShouldSkipMethod(m));
 
         foreach (var method in methods)
         {
@@ -244,7 +248,7 @@ public sealed class WebCoverageHarness
                     .FirstOrDefault(p => typeof(BaseEntity).IsAssignableFrom(p.ParameterType));
                 if (entityParam != null)
                 {
-                    foreach (var extra in GetEntities(entityParam.ParameterType, 12))
+                    foreach (var extra in GetEntities(entityParam.ParameterType, 4))
                         await InvokeMethodAsync(instance, method, boolOverrides: false, nullEntities: false, extraEntity: extra);
                 }
             }

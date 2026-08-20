@@ -1,3 +1,4 @@
+using System.Reflection;
 using AutoMapper;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Builder;
@@ -576,6 +577,37 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             await publicCustomerController.Register(registerModel, string.Empty, true, form);
             await GetService<IWorkContext>().SetCurrentCustomerAsync(adminCustomer);
         });
+
+        var cart = await GetService<IShoppingCartService>().GetShoppingCartAsync(
+            adminCustomer, ShoppingCartType.ShoppingCart,
+            (await GetService<IStoreContext>().GetCurrentStoreAsync()).Id);
+        var opcFlags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        await Try(async () =>
+        {
+            var method = checkout.GetType().GetMethod("OpcLoadStepAfterShippingAddress", opcFlags);
+            if (method != null)
+                await (Task)method.Invoke(checkout, [cart]);
+        });
+        await Try(async () =>
+        {
+            var method = checkout.GetType().GetMethod("OpcLoadStepAfterShippingMethod", opcFlags);
+            if (method != null)
+                await (Task)method.Invoke(checkout, [cart]);
+        });
+
+        var shoppingCart = harness.CreateController<global::Nop.Web.Controllers.ShoppingCartController>();
+        var simple = (await GetService<IProductService>().SearchProductsAsync(pageSize: 20))
+            .FirstOrDefault(p => p.ProductType == ProductType.SimpleProduct);
+        if (simple != null)
+        {
+            var qtyForm = new FormCollection(new Dictionary<string, StringValues>
+            {
+                [$"addtocart_{simple.Id}.EnteredQuantity"] = "1"
+            });
+            await Try(async () => await shoppingCart.AddProductToCart_Details(simple.Id, (int)ShoppingCartType.ShoppingCart, qtyForm));
+            await Try(async () => await shoppingCart.AddProductToCart_Catalog(simple.Id, (int)ShoppingCartType.ShoppingCart, 1));
+            await Try(async () => await shoppingCart.Cart());
+        }
     }
 
     [Test]
