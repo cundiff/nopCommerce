@@ -78,6 +78,7 @@ using Nop.Services.Vendors;
 using Nop.Tests.Nop.Services.Tests.ScheduleTasks;
 using Nop.Tests.Nop.Web.Tests.Public.Factories;
 using Nop.Web.Areas.Admin.Factories;
+using Nop.Web.Areas.Admin.Helpers;
 using Nop.Web.Framework;
 using Nop.Web.Framework.Factories;
 using Nop.Web.Framework.Infrastructure.Extensions;
@@ -506,6 +507,16 @@ public partial class BaseNopTest
         services.AddTransient<IExternalAuthenticationMethodModelFactory, ExternalAuthenticationMethodModelFactory>();
         services.AddTransient<IGiftCardModelFactory, GiftCardModelFactory>();
         services.AddTransient<IHomeModelFactory, HomeModelFactory>();
+        services.AddTransient<IAddressModelFactory, AddressModelFactory>();
+        services.AddTransient<IFilterLevelValueModelFactory, FilterLevelValueModelFactory>();
+        services.AddTransient<IMultiFactorAuthenticationMethodModelFactory, MultiFactorAuthenticationMethodModelFactory>();
+        services.AddTransient<INewsLetterSubscriptionModelFactory, NewsLetterSubscriptionModelFactory>();
+        services.AddTransient<INewsLetterSubscriptionTypeModelFactory, NewsLetterSubscriptionTypeModelFactory>();
+        services.AddTransient<IMenuModelFactory, MenuModelFactory>();
+        services.AddTransient<IReminderModelFactory, ReminderModelFactory>();
+        services.AddTransient<global::Nop.Web.Areas.Admin.Factories.IWidgetModelFactory, global::Nop.Web.Areas.Admin.Factories.WidgetModelFactory>();
+        services.AddTransient<ISummernoteHelper, SummernoteHelper>();
+        services.AddSingleton(Options.Create(new MvcNewtonsoftJsonOptions()));
         services.AddTransient<ILanguageModelFactory, LanguageModelFactory>();
         services.AddTransient<ILogModelFactory, LogModelFactory>();
         services.AddTransient<IManufacturerModelFactory, ManufacturerModelFactory>();
@@ -558,8 +569,11 @@ public partial class BaseNopTest
         services.AddTransient<Web.Factories.ISitemapModelFactory, Web.Factories.SitemapModelFactory>();
         services.AddTransient<Web.Factories.ITopicModelFactory, Web.Factories.TopicModelFactory>();
         services.AddTransient<Web.Factories.IVendorModelFactory, Web.Factories.VendorModelFactory>();
+        services.AddTransient<Web.Factories.IFilterLevelValueModelFactory, Web.Factories.FilterLevelValueModelFactory>();
+        services.AddTransient<Web.Factories.IMenuModelFactory, Web.Factories.MenuModelFactory>();
 
         _serviceProvider = services.BuildServiceProvider();
+        httpContext.RequestServices = _serviceProvider;
 
         EngineContext.Replace(new NopTestEngine(_serviceProvider));
 
