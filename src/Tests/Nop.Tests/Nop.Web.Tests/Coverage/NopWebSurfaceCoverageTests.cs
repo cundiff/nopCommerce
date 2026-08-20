@@ -898,7 +898,6 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                         && (t.Namespace == "AspNetCoreGeneratedDocument" || t.FullName?.Contains("AspNetCoreGeneratedDocument", StringComparison.Ordinal) == true)
                         && t.GetMethod("ExecuteAsync") != null);
         await harness.ExerciseRazorPagesAsync(types);
-        TestContext.WriteLine($"Razor: created={harness.TypesCreated} invoked={harness.MethodsInvoked} failed={harness.MethodsFailed}");
         harness.TypesCreated.Should().BeGreaterThan(0);
     }
 

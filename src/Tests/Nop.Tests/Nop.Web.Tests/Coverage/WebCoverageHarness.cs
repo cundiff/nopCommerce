@@ -69,7 +69,6 @@ public sealed class WebCoverageHarness
         services.AddSingleton<IHtmlGenerator, CoverageHtmlGenerator>();
         services.AddSingleton<IAntiforgery, CoverageAntiforgery>();
         services.AddTransient(typeof(IHtmlHelper), _ => EmptyProxy.Create(typeof(IHtmlHelper)));
-        services.AddSingleton<ITagHelperFactory, CoverageTagHelperFactory>();
         var provider = services.BuildServiceProvider();
         _ = provider.GetRequiredService<IHtmlGenerator>();
         _ = provider.GetRequiredService<ITagHelperFactory>();
@@ -614,6 +613,7 @@ public sealed class WebCoverageHarness
                 {
                     razorPage.Layout = null;
                     razorPage.HtmlEncoder ??= HtmlEncoder.Default;
+                    var savedViewData = razorPage.ViewContext.ViewData;
                     try
                     {
                         MvcServices.Value.GetService<IRazorPageActivator>()
@@ -624,12 +624,16 @@ public sealed class WebCoverageHarness
                         // keep the helpers attached in AttachMvc
                     }
 
+                    if (razorPage.ViewContext?.ViewData?.Model == null && savedViewData != null)
+                        razorPage.ViewContext.ViewData = savedViewData;
+
                     AttachRazorRuntime(razorPage);
 
                     // Real IHtmlHelper/IViewComponentHelper try to locate partials and
                     // view components via the MVC view engine. Stub them so this page's
                     // own ExecuteAsync can finish; compiled partials are invoked separately.
                     ActivateRazorInjects(instance, razorPage.ViewContext);
+                    FillRazorModelGraph(instance);
                 }
 
                 var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
@@ -874,7 +878,9 @@ public sealed class WebCoverageHarness
     private ViewDataDictionary CreateViewData(Type modelType, Type ownerType)
     {
         object model = null;
-        if (modelType != null)
+        if (modelType == typeof(DataTablesModel))
+            model = CreateCoverageTableModel();
+        else if (modelType != null)
         {
             try
             {
@@ -997,8 +1003,29 @@ public sealed class WebCoverageHarness
         if (ShouldSkipFill(type))
             return;
 
-        if (model is DataTablesModel tables && string.IsNullOrEmpty(tables.Name))
-            tables.Name = "coverage-grid";
+        if (model is DataTablesModel tables)
+        {
+            if (string.IsNullOrEmpty(tables.Name))
+                tables.Name = "coverage-grid";
+            tables.UrlRead ??= new DataUrl("List", "Product", new RouteValueDictionary());
+            tables.UrlDelete ??= new DataUrl("/coverage/delete", "id");
+            tables.UrlUpdate ??= new DataUrl("/coverage/update", true);
+            if (tables.ColumnCollection == null || tables.ColumnCollection.Count == 0)
+            {
+                tables.ColumnCollection =
+                [
+                    new ColumnProperty("Name") { Title = "Name", Visible = true, Searchable = true, AutoWidth = true },
+                    new ColumnProperty("Id") { Title = "Id", IsMasterCheckBox = true, Width = "50" }
+                ];
+            }
+
+            if (tables.Filters == null || tables.Filters.Count == 0)
+                tables.Filters = [new FilterParameter("Name")];
+            if (string.IsNullOrEmpty(tables.LengthMenu))
+                tables.LengthMenu = "10,15,20";
+            if (tables.Length <= 0)
+                tables.Length = 15;
+        }
 
         if (model is DataUrl dataUrl)
         {
@@ -1484,6 +1511,30 @@ public sealed class WebCoverageHarness
             _entities[type] = list[0];
 
         return list.Take(take).ToList();
+    }
+
+    private static DataTablesModel CreateCoverageTableModel()
+    {
+        return new DataTablesModel
+        {
+            Name = "coverage-grid",
+            UrlRead = new DataUrl("List", "Product", new RouteValueDictionary()),
+            UrlDelete = new DataUrl("/coverage/delete", "id"),
+            UrlUpdate = new DataUrl("/coverage/update", true),
+            SearchButtonId = "search",
+            Length = 15,
+            LengthMenu = "10,15,20",
+            RefreshButton = true,
+            ServerSide = true,
+            Paging = true,
+            Info = true,
+            ColumnCollection =
+            [
+                new ColumnProperty("Name") { Title = "Name", Visible = true, Searchable = true, AutoWidth = true },
+                new ColumnProperty("Id") { Title = "Id", IsMasterCheckBox = true, Width = "50" }
+            ],
+            Filters = [new FilterParameter("Name")]
+        };
     }
 
     private static object CreateDefault(Type type)
