@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Reflection;
+using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Html;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -16,12 +17,20 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
 using Nop.Core;
+using Nop.Core.Domain.Customers;
 using Nop.Core.Domain.Orders;
+using Nop.Core.Domain.Payments;
+using Nop.Core.Domain.Shipping;
+using Nop.Core.Domain.Stores;
 using Nop.Core.Events;
 using Nop.Data;
 using Nop.Services.Catalog;
+using Nop.Services.Common;
+using Nop.Services.Configuration;
 using Nop.Services.Customers;
 using Nop.Services.Orders;
+using Nop.Services.Stores;
+using Nop.Web.Framework;
 using Nop.Web.Framework.Models;
 
 namespace Nop.Tests.Nop.Web.Tests.Coverage;
@@ -65,6 +74,70 @@ public sealed class WebCoverageHarness
         AttachMvc(instance);
         TypesCreated++;
         return instance;
+    }
+
+    public async Task EnableAdminStoreScopeAsync()
+    {
+        var storeService = _services.GetRequiredService<IStoreService>();
+        var stores = await storeService.GetAllStoresAsync();
+        if (stores.Count < 2)
+        {
+            var source = stores.First();
+            await storeService.InsertStoreAsync(new Store
+            {
+                Name = "Coverage Store",
+                Url = "http://coverage.local/",
+                Hosts = "coverage.local",
+                SslEnabled = source.SslEnabled,
+                DefaultLanguageId = source.DefaultLanguageId,
+                DisplayOrder = 99,
+                CompanyName = source.CompanyName ?? "Coverage",
+                CompanyAddress = source.CompanyAddress,
+                CompanyPhoneNumber = source.CompanyPhoneNumber,
+                CompanyVat = source.CompanyVat,
+                DefaultTitle = source.DefaultTitle,
+                DefaultMetaDescription = source.DefaultMetaDescription,
+                DefaultMetaKeywords = source.DefaultMetaKeywords,
+                HomepageTitle = source.HomepageTitle,
+                HomepageDescription = source.HomepageDescription
+            });
+            stores = await storeService.GetAllStoresAsync();
+        }
+
+        var scopeStore = stores.Last();
+        var customer = await _services.GetRequiredService<IWorkContext>().GetCurrentCustomerAsync();
+        await _services.GetRequiredService<IGenericAttributeService>()
+            .SaveAttributeAsync(customer, NopCustomerDefaults.AdminAreaStoreScopeConfigurationAttribute, scopeStore.Id);
+
+        if (_services.GetService<IStoreContext>() is WebStoreContext webStore)
+        {
+            typeof(WebStoreContext)
+                .GetField("_cachedActiveStoreScopeConfiguration", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.SetValue(webStore, null);
+            typeof(WebStoreContext)
+                .GetField("_cachedStore", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.SetValue(webStore, null);
+        }
+    }
+
+    public async Task EnableCheckoutTestPluginsAsync()
+    {
+        var shipping = _services.GetRequiredService<ShippingSettings>();
+        shipping.ActiveShippingRateComputationMethodSystemNames ??= [];
+        if (!shipping.ActiveShippingRateComputationMethodSystemNames
+                .Contains("FixedRateTestShippingRateComputationMethod", StringComparer.OrdinalIgnoreCase))
+        {
+            shipping.ActiveShippingRateComputationMethodSystemNames.Add("FixedRateTestShippingRateComputationMethod");
+        }
+
+        var payment = _services.GetRequiredService<PaymentSettings>();
+        payment.ActivePaymentMethodSystemNames ??= [];
+        if (!payment.ActivePaymentMethodSystemNames.Contains("Payments.TestMethod", StringComparer.OrdinalIgnoreCase))
+            payment.ActivePaymentMethodSystemNames.Add("Payments.TestMethod");
+
+        var settings = _services.GetRequiredService<ISettingService>();
+        await settings.SaveSettingAsync(shipping);
+        await settings.SaveSettingAsync(payment);
     }
 
     public async Task SeedShoppingCartAsync()
@@ -257,6 +330,7 @@ public sealed class WebCoverageHarness
 
     public async Task ExerciseCheckoutFlowAsync()
     {
+        await EnableCheckoutTestPluginsAsync();
         await SeedShoppingCartAsync();
 
         var checkoutType = typeof(global::Nop.Web.Controllers.CheckoutController);
@@ -308,6 +382,8 @@ public sealed class WebCoverageHarness
 
         var billingModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel), "model", checkoutType);
         await Call("OpcSaveBilling", billingModel, form);
+        await Call("NewBillingAddress", billingModel, form);
+        await Call("SaveEditBillingAddress", billingModel, form, true);
 
         await Call("ShippingAddress");
         if (addressId > 0)
@@ -315,19 +391,59 @@ public sealed class WebCoverageHarness
 
         var shippingModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel), "model", checkoutType);
         await Call("OpcSaveShipping", shippingModel, form);
+        await Call("NewShippingAddress", shippingModel, form);
+        await Call("SaveEditShippingAddress", shippingModel, form, true);
 
-        await Call("ShippingMethod");
-        await Call("SelectShippingMethod", "test", form);
-        await Call("OpcSaveShippingMethod", "test", form);
+        var shippingOption = "Shipping option 1___FixedRateTestShippingRateComputationMethod";
+        try
+        {
+            var checkoutFactory = _services.GetRequiredService<global::Nop.Web.Factories.ICheckoutModelFactory>();
+            var address = await _services.GetRequiredService<ICustomerService>().GetCustomerShippingAddressAsync(customer)
+                          ?? addresses.FirstOrDefault();
+            var cart = await _services.GetRequiredService<IShoppingCartService>()
+                .GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart,
+                    (await _services.GetRequiredService<IStoreContext>().GetCurrentStoreAsync()).Id);
+            var shippingMethods = await checkoutFactory.PrepareShippingMethodModelAsync(cart, address);
+            var selected = shippingMethods?.ShippingMethods?.FirstOrDefault();
+            if (selected != null)
+                shippingOption = $"{selected.Name}___{selected.ShippingRateComputationMethodSystemName}";
+        }
+        catch
+        {
+            // keep the test plugin option string
+        }
+
+        var orderSettings = _services.GetRequiredService<OrderSettings>();
+        var previousOpc = orderSettings.OnePageCheckoutEnabled;
+        orderSettings.OnePageCheckoutEnabled = false;
+        try
+        {
+            await Call("ShippingMethod");
+            await Call("SelectShippingMethod", shippingOption, form);
+            await Call("PaymentMethod");
+            var paymentModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel), "model", checkoutType);
+            await Call("SelectPaymentMethod", "Payments.TestMethod", paymentModel);
+            await Call("PaymentInfo");
+            await Call("EnterPaymentInfo", form);
+            await Call("Confirm");
+        }
+        finally
+        {
+            orderSettings.OnePageCheckoutEnabled = previousOpc;
+        }
+
+        await Call("OpcSaveShippingMethod", shippingOption, form);
         await Call("PaymentMethod");
-        var paymentModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel), "model", checkoutType);
-        await Call("SelectPaymentMethod", "Payments.TestMethod", paymentModel);
-        await Call("OpcSavePaymentMethod", "Payments.TestMethod", paymentModel);
+        var opcPayment = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel), "model", checkoutType);
+        await Call("SelectPaymentMethod", "Payments.TestMethod", opcPayment);
+        await Call("OpcSavePaymentMethod", "Payments.TestMethod", opcPayment);
         await Call("PaymentInfo");
         await Call("EnterPaymentInfo", form);
         await Call("OpcSavePaymentInfo", form);
         await Call("Confirm");
         await Call("Completed", (int?)null);
+        await Call("GetAddressById", addressId);
+        await Call("OpcCompleteRedirectionPayment");
     }
 
     private async Task InvokeMethodAsync(object instance, MethodInfo method, bool boolOverrides, bool nullEntities, BaseEntity extraEntity)
@@ -384,19 +500,47 @@ public sealed class WebCoverageHarness
 
                 TypesCreated++;
                 AttachMvc(instance);
+                FillRazorModelGraph(instance);
 
                 if (instance is RazorPageBase razorPage)
+                {
                     razorPage.Layout = null;
+                    razorPage.HtmlEncoder ??= HtmlEncoder.Default;
+                    var diagnostic = razorPage.GetType().GetProperty("DiagnosticSource");
+                    if (diagnostic?.CanWrite == true && diagnostic.GetValue(razorPage) == null
+                        && diagnostic.PropertyType.IsAssignableFrom(typeof(System.Diagnostics.DiagnosticListener)))
+                    {
+                        diagnostic.SetValue(razorPage, new System.Diagnostics.DiagnosticListener("Nop.Web.Coverage"));
+                    }
+                }
 
                 var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
                 if (execute == null)
                     continue;
 
-                var (ok, _) = await TryInvokeAsync(instance, execute, [], TimeSpan.FromSeconds(3));
-                if (ok)
+                try
+                {
+                    var raw = execute.Invoke(instance, null);
+                    if (raw is Task task)
+                    {
+                        var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(3)));
+                        if (finished != task)
+                        {
+                            MethodsFailed++;
+                            continue;
+                        }
+
+                        await task;
+                    }
+
                     MethodsInvoked++;
-                else
+                }
+                catch (Exception ex)
+                {
                     MethodsFailed++;
+                    if (Failures.Count < 40)
+                        Failures.Add($"{type.Name}: {ex.GetBaseException().GetType().Name}: {ex.GetBaseException().Message}");
+                }
             }
             catch (Exception ex)
             {
@@ -520,7 +664,7 @@ public sealed class WebCoverageHarness
         }
     }
 
-    private void AttachMvc(object instance)
+    public void AttachMvc(object instance)
     {
         var http = _services.GetRequiredService<IHttpContextAccessor>().HttpContext
                    ?? throw new InvalidOperationException("HttpContext is not available");
@@ -582,25 +726,136 @@ public sealed class WebCoverageHarness
         {
             razorPage.ViewContext = viewContext;
             razorPage.Layout = null;
+            razorPage.HtmlEncoder ??= HtmlEncoder.Default;
+            ActivateRazorInjects(instance, viewContext);
+        }
+    }
 
-            foreach (var prop in instance.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+    private void ActivateRazorInjects(object instance, ViewContext viewContext)
+    {
+        for (var type = instance.GetType(); type != null && type != typeof(object); type = type.BaseType)
+        {
+            foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
             {
                 if (prop.GetIndexParameters().Length != 0)
                     continue;
-                if (prop.Name is not ("Html" or "Url" or "Component" or "Json" or "DiagnosticSource"))
+
+                var setter = prop.GetSetMethod(true);
+                if (setter == null)
                     continue;
-                if (!prop.PropertyType.IsInterface)
+
+                object value = null;
+                var propertyType = prop.PropertyType;
+                try
+                {
+                    if (prop.Name is "Html" or "Component" or "Json"
+                        || (propertyType.IsGenericType && propertyType.GetGenericTypeDefinition() == typeof(IHtmlHelper<>)))
+                    {
+                        value = EmptyProxy.Create(propertyType, viewContext);
+                    }
+                    else if (propertyType == typeof(IUrlHelper) || prop.Name == "Url")
+                    {
+                        value = _services.GetRequiredService<IUrlHelperFactory>().GetUrlHelper(viewContext);
+                    }
+                    else if (propertyType.IsInterface)
+                    {
+                        value = _services.GetService(propertyType) ?? EmptyProxy.Create(propertyType, viewContext);
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (value == null)
                     continue;
 
                 try
                 {
-                    var setter = prop.GetSetMethod(true);
-                    setter?.Invoke(instance, [EmptyProxy.Create(prop.PropertyType)]);
+                    setter.Invoke(instance, [value]);
                 }
                 catch
                 {
-                    // optional injects
+                    // compiled pages expose a subset of these
                 }
+
+                if (value is IViewContextAware aware)
+                {
+                    try
+                    {
+                        aware.Contextualize(viewContext);
+                    }
+                    catch
+                    {
+                        // optional
+                    }
+                }
+            }
+        }
+    }
+
+    private void FillRazorModelGraph(object page)
+    {
+        try
+        {
+            var modelProp = page.GetType().GetProperty("Model", BindingFlags.Public | BindingFlags.Instance);
+            var model = modelProp?.GetValue(page) ?? (page as RazorPageBase)?.ViewContext?.ViewData?.Model;
+            FillGraph(model, 0);
+        }
+        catch
+        {
+            // dummy models still let ExecuteAsync start
+        }
+    }
+
+    private void FillGraph(object model, int depth)
+    {
+        if (model == null || depth > 3)
+            return;
+
+        var type = model.GetType();
+        if (type == typeof(string) || type.IsPrimitive || type.IsEnum)
+            return;
+
+        foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (!prop.CanWrite || prop.GetIndexParameters().Length != 0)
+                continue;
+
+            try
+            {
+                var current = prop.CanRead ? prop.GetValue(model) : null;
+                if (prop.PropertyType == typeof(string) && current == null)
+                {
+                    prop.SetValue(model, prop.Name);
+                }
+                else if (typeof(BaseNopModel).IsAssignableFrom(prop.PropertyType))
+                {
+                    if (current == null)
+                    {
+                        current = CreateDefault(prop.PropertyType);
+                        if (current != null)
+                            prop.SetValue(model, current);
+                    }
+
+                    FillGraph(current, depth + 1);
+                }
+                else if (current is IEnumerable enumerable && current is not string)
+                {
+                    foreach (var item in enumerable)
+                    {
+                        FillGraph(item, depth + 1);
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+                // skip unreadable properties
             }
         }
     }
@@ -855,6 +1110,9 @@ public sealed class WebCoverageHarness
                     prop.SetValue(model, prop.Name == "PageSize" ? 15 : 1);
                 }
             }
+
+            if (model is BaseSearchModel searchModel)
+                searchModel.SetGridPageSize();
         }
         catch
         {
@@ -959,18 +1217,43 @@ public sealed class WebCoverageHarness
 
     public class EmptyProxy : DispatchProxy
     {
-        public static object Create(Type interfaceType)
+        public ViewContext ViewContext { get; set; }
+
+        public static object Create(Type interfaceType, ViewContext viewContext = null)
         {
+            if (interfaceType == null || !interfaceType.IsInterface)
+                return null;
+
             var proxyType = typeof(DispatchProxy);
             var create = proxyType.GetMethods(BindingFlags.Public | BindingFlags.Static)
                 .First(m => m.Name == nameof(DispatchProxy.Create) && m.GetGenericArguments().Length == 2);
-            return create.MakeGenericMethod(interfaceType, typeof(EmptyProxy)).Invoke(null, null);
+            var proxy = create.MakeGenericMethod(interfaceType, typeof(EmptyProxy)).Invoke(null, null);
+            if (proxy is EmptyProxy empty)
+                empty.ViewContext = viewContext;
+            return proxy;
         }
 
         protected override object Invoke(MethodInfo targetMethod, object[] args)
         {
             if (targetMethod == null)
                 return null;
+
+            var name = targetMethod.Name;
+            if (name == "get_ViewContext" || name == "get_ActionContext")
+                return ViewContext;
+            if (name == "get_ViewData")
+                return ViewContext?.ViewData;
+            if (name == "get_ViewBag")
+                return ViewContext?.ViewBag;
+            if (name == "get_TempData")
+                return ViewContext?.TempData;
+            if (name == "get_HttpContext")
+                return ViewContext?.HttpContext;
+            if (name == "Contextualize" && args is { Length: 1 } && args[0] is ViewContext vc)
+            {
+                ViewContext = vc;
+                return null;
+            }
 
             var returnType = targetMethod.ReturnType;
             if (returnType == typeof(void))
@@ -998,6 +1281,10 @@ public sealed class WebCoverageHarness
             if (typeof(IHtmlContent).IsAssignableFrom(type))
                 return HtmlString.Empty;
             if (type.IsValueType)
+                return Activator.CreateInstance(type);
+            if (type.IsArray)
+                return Array.CreateInstance(type.GetElementType()!, 0);
+            if (type.IsClass && type.GetConstructor(Type.EmptyTypes) != null)
                 return Activator.CreateInstance(type);
             return null;
         }

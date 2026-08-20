@@ -2,21 +2,45 @@ using System.Reflection;
 using AutoMapper;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Html;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Abstractions;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.AspNetCore.Mvc.Rendering;
+using Microsoft.AspNetCore.Mvc.ViewEngines;
+using Microsoft.AspNetCore.Mvc.ViewFeatures;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
 using Nop.Core;
+using Nop.Core.Caching;
+using Nop.Core.Configuration;
 using Nop.Core.Domain.Catalog;
+using Nop.Core.Domain.Customers;
 using Nop.Core.Domain.Orders;
+using Nop.Core.Infrastructure;
 using Nop.Core.Infrastructure.Mapper;
+using Nop.Data;
 using Nop.Services.Catalog;
+using Nop.Services.Common;
 using Nop.Services.Customers;
+using Nop.Services.Helpers;
+using Nop.Services.Installation;
+using Nop.Services.Localization;
 using Nop.Services.Orders;
+using Nop.Services.Plugins;
+using Nop.Services.Security;
 using Nop.Tests.Nop.Services.Tests;
 using Nop.Web.Areas.Admin.Infrastructure.Mapper;
+using Nop.Web.Extensions;
 using Nop.Web.Framework.Mvc.Routing;
+using Nop.Web.Infrastructure;
+using Nop.Web.Infrastructure.Installation;
+using Nop.Web.Models.Common;
+using Nop.Web.Models.Customer;
+using Nop.Web.Models.Install;
 using NUnit.Framework;
 
 namespace Nop.Tests.Nop.Web.Tests.Coverage;
@@ -27,6 +51,14 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     private static readonly Type WebAssemblyMarker = typeof(global::Nop.Web.Controllers.HomeController);
 
     private WebCoverageHarness CreateHarness() => new(ServiceProvider);
+
+    [OneTimeSetUp]
+    public async Task CoverageFixtureSetup()
+    {
+        var harness = CreateHarness();
+        await harness.EnableCheckoutTestPluginsAsync();
+        await harness.EnableAdminStoreScopeAsync();
+    }
 
     [Test]
     public async Task ExerciseAdminFactories()
@@ -607,7 +639,98 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             await Try(async () => await shoppingCart.AddProductToCart_Details(simple.Id, (int)ShoppingCartType.ShoppingCart, qtyForm));
             await Try(async () => await shoppingCart.AddProductToCart_Catalog(simple.Id, (int)ShoppingCartType.ShoppingCart, 1));
             await Try(async () => await shoppingCart.Cart());
+            await Try(async () => await shoppingCart.ProductDetails_AttributeChange(simple.Id, true, true, qtyForm));
+            await Try(async () => await shoppingCart.CheckoutAttributeChange(qtyForm, true));
+            await Try(async () => await shoppingCart.GetEstimateShipping(new global::Nop.Web.Models.ShoppingCart.EstimateShippingModel
+            {
+                ZipPostalCode = "10021",
+                CountryId = 1,
+                StateProvinceId = 1
+            }, qtyForm));
+            await Try(async () => await shoppingCart.ApplyDiscountCoupon("coverage", qtyForm));
+            await Try(async () => await shoppingCart.CustomerCart());
+            await Try(async () => await shoppingCart.ContinueShopping());
+            await Try(async () => await shoppingCart.Wishlist(null, null));
         }
+
+        await Try(async () =>
+        {
+            var product = (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First();
+            var copyModel = await productFactory.PrepareProductModelAsync(null, product);
+            copyModel.CopyProductModel.Id = product.Id;
+            copyModel.CopyProductModel.Name = product.Name + " coverage copy";
+            copyModel.CopyProductModel.Published = false;
+            copyModel.CopyProductModel.CopyMultimedia = false;
+            productController.ModelState.Clear();
+            await productController.CopyProduct(copyModel);
+        });
+
+        foreach (var order in await GetService<IOrderService>().SearchOrdersAsync(pageIndex: 0, pageSize: 3))
+        {
+            await Try(async () => await orderController.AddShipment(order.Id));
+            await Try(async () => await orderController.Edit(order.Id));
+            await Try(async () => await orderController.PdfInvoice(order.Id));
+            await Try(async () =>
+            {
+                var items = await GetService<IOrderService>().GetOrderItemsAsync(order.Id);
+                var item = items.FirstOrDefault();
+                if (item == null)
+                    return;
+                var itemForm = new FormCollection(new Dictionary<string, StringValues>
+                {
+                    ["quantity"] = "1",
+                    [$"qtyToAdd{item.Id}"] = "1"
+                });
+                await orderController.EditOrderItem(item.Id, itemForm);
+                await orderController.AddProductToOrder(order.Id);
+                var simpleId = (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First().Id;
+                await orderController.AddProductToOrderDetails(order.Id, simpleId);
+            });
+        }
+
+        await Try(async () =>
+        {
+            var login = new LoginModel
+            {
+                Email = NopTestsDefaults.AdminEmail,
+                Username = NopTestsDefaults.AdminEmail,
+                Password = NopTestsDefaults.AdminPassword
+            };
+            publicCustomerController.ModelState.Clear();
+            await publicCustomerController.Login(login, string.Empty, true);
+            await publicCustomerController.Login(false);
+            await publicCustomerController.PasswordRecovery();
+            var recovery = new PasswordRecoveryModel { Email = NopTestsDefaults.AdminEmail };
+            await publicCustomerController.PasswordRecoverySend(recovery, true);
+            await publicCustomerController.ChangePassword();
+            await publicCustomerController.Addresses();
+            await publicCustomerController.DownloadableProducts();
+            await publicCustomerController.GdprTools();
+            await publicCustomerController.CheckGiftCardBalance();
+            var addResult = await publicCustomerController.AddressAdd();
+            if (addResult is ViewResult { Model: CustomerAddressEditModel addressModel })
+            {
+                publicCustomerController.ModelState.Clear();
+                await publicCustomerController.AddressAdd(addressModel, form);
+            }
+
+            var existing = addresses.FirstOrDefault();
+            if (existing != null)
+            {
+                var editResult = await publicCustomerController.AddressEdit(existing.Id);
+                if (editResult is ViewResult { Model: CustomerAddressEditModel editModel })
+                {
+                    publicCustomerController.ModelState.Clear();
+                    await publicCustomerController.AddressEdit(editModel, form);
+                }
+            }
+        });
+
+        var reminder = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.ReminderController>();
+        await Try(async () => await reminder.Index());
+        var security = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.SecurityController>();
+        await Try(async () => await security.AccessDenied("/Admin", "Product.List"));
+        await Try(async () => await security.Permissions());
     }
 
     [Test]
@@ -716,14 +839,141 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                         && (t.Namespace == "AspNetCoreGeneratedDocument" || t.FullName?.Contains("AspNetCoreGeneratedDocument", StringComparison.Ordinal) == true)
                         && t.GetMethod("ExecuteAsync") != null);
         await harness.ExerciseRazorPagesAsync(types);
+        harness.TypesCreated.Should().BeGreaterThan(0);
     }
 
     [Test]
     public async Task ExerciseHtmlExtensions()
     {
         var harness = CreateHarness();
-        await harness.ExerciseStaticTypeAsync(typeof(global::Nop.Web.Extensions.HtmlExtensions));
+        await harness.ExerciseStaticTypeAsync(typeof(HtmlExtensions));
+
+        var http = GetService<IHttpContextAccessor>().HttpContext
+                   ?? throw new InvalidOperationException("HttpContext is not available");
+        var actionContext = new ActionContext(http, http.GetRouteData() ?? new RouteData(), new ActionDescriptor());
+        var viewData = new ViewDataDictionary(new EmptyModelMetadataProvider(), new ModelStateDictionary());
+        var viewContext = new ViewContext(
+            actionContext,
+            new CoverageNullView(),
+            viewData,
+            GetService<ITempDataDictionaryFactory>().GetTempData(http),
+            TextWriter.Null,
+            new HtmlHelperOptions());
+
+        var html = (IHtmlHelper)WebCoverageHarness.EmptyProxy.Create(typeof(IHtmlHelper), viewContext);
+        var typedHtml = (IHtmlHelper<PagerModel>)WebCoverageHarness.EmptyProxy.Create(typeof(IHtmlHelper<PagerModel>), viewContext);
+
+        _ = html.GetJQueryDateFormat();
+        _ = html.GetUIDirection();
+        _ = html.GetUIDirection(true);
+        _ = await html.ShouldUseRtlThemeAsync();
+        _ = await html.IsTourActiveAsync();
+        http.Request.QueryString = new QueryString("?ShowTour=true");
+        _ = await html.IsTourActiveAsync();
+
+        var localization = GetService<ILocalizationService>();
+        async Task RunPager(bool useRouteLinks, int pageIndex)
+        {
+            var pager = new PagerModel(localization)
+            {
+                TotalRecords = 100,
+                PageSize = 10,
+                PageIndex = pageIndex,
+                ShowFirst = true,
+                ShowLast = true,
+                ShowNext = true,
+                ShowPrevious = true,
+                ShowIndividualPages = true,
+                ShowPagerItems = true,
+                ShowTotalSummary = true,
+                UseRouteLinks = useRouteLinks,
+                RouteActionName = "List",
+                RouteValues = new BaseRouteValues()
+            };
+            _ = await typedHtml.PagerAsync(pager);
+        }
+
+        await RunPager(false, 0);
+        await RunPager(true, 4);
+        await RunPager(false, 9);
+        _ = await typedHtml.PagerAsync(new PagerModel(localization) { TotalRecords = 0 });
+        _ = html.Pager(new CoveragePageableModel());
+
         harness.MethodsInvoked.Should().BeGreaterThan(0);
+    }
+
+    [Test]
+    public void ExerciseNopStartup()
+    {
+        var startup = new NopStartup();
+        startup.ConfigureServices(new ServiceCollection(), new ConfigurationBuilder().AddInMemoryCollection().Build());
+        startup.Order.Should().BeGreaterThan(0);
+        startup.Configure(new ApplicationBuilder(ServiceProvider));
+    }
+
+    [Test]
+    public void ExerciseInstallControllerHelpers()
+    {
+        var sp = ServiceProvider;
+        var install = new global::Nop.Web.Controllers.InstallController(
+            sp.GetRequiredService<AppSettings>(),
+            new Lazy<IInstallationLocalizationService>(sp.GetRequiredService<IInstallationLocalizationService>),
+            new Lazy<IInstallationService>(sp.GetRequiredService<IInstallationService>),
+            sp.GetRequiredService<INopFileProvider>(),
+            new Lazy<IPermissionService>(sp.GetRequiredService<IPermissionService>),
+            new Lazy<IPluginService>(sp.GetRequiredService<IPluginService>),
+            new Lazy<IStaticCacheManager>(sp.GetRequiredService<IStaticCacheManager>),
+            new Lazy<IUploadService>(sp.GetRequiredService<IUploadService>),
+            new Lazy<IWebHelper>(sp.GetRequiredService<IWebHelper>),
+            new Lazy<NopHttpClient>(sp.GetRequiredService<NopHttpClient>));
+        CreateHarness().AttachMvc(install);
+
+        _ = install.Index();
+        _ = install.ChangeLanguage("en");
+        _ = install.RestartInstall();
+        _ = install.RestartApplication();
+
+        var model = new InstallModel { InstallRegionalResources = true };
+        foreach (var name in new[] { "PrepareCountryList", "PrepareLanguageList", "PrepareAvailableDataProviders" })
+        {
+            var method = typeof(global::Nop.Web.Controllers.InstallController)
+                .GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            method?.Invoke(install, [model]);
+        }
+
+        model.AvailableCountries.Should().NotBeEmpty();
+    }
+
+    [Test]
+    public async Task ExerciseAdminHelpersAndInfrastructure()
+    {
+        var harness = CreateHarness();
+        var types = WebAssemblyMarker.Assembly.GetTypes()
+            .Where(t => t.IsClass && !t.IsAbstract && !t.ContainsGenericParameters
+                        && t.Namespace is "Nop.Web.Areas.Admin.Helpers"
+                            or "Nop.Web.Areas.Admin.Infrastructure"
+                            or "Nop.Web.Infrastructure");
+        await harness.ExerciseTypesAsync(types, asMvc: false);
+        harness.TypesCreated.Should().BeGreaterThan(0);
+    }
+
+    private sealed class CoverageNullView : IView
+    {
+        public string Path => string.Empty;
+        public Task RenderAsync(ViewContext context) => Task.CompletedTask;
+    }
+
+    private sealed class CoveragePageableModel : global::Nop.Web.Framework.UI.Paging.IPageableModel
+    {
+        public int PageIndex { get; set; }
+        public int PageNumber => PageIndex + 1;
+        public int PageSize { get; set; } = 10;
+        public int TotalItems { get; set; } = 50;
+        public int TotalPages => 5;
+        public int FirstItem => 1;
+        public int LastItem => 10;
+        public bool HasPreviousPage => false;
+        public bool HasNextPage => true;
     }
 
     private static IEnumerable<Type> TypesIn(string ns, string suffix = null)
