@@ -727,8 +727,7 @@ public sealed class WebCoverageHarness
     {
         try
         {
-            if (instance is Controller controller && IsLikelyMutating(method)
-                && instance.GetType().Name is "SettingController" or "InstallController" or "PluginController")
+            if (instance is Controller controller && IsLikelyMutating(method))
                 controller.ModelState.AddModelError("_coverage", "do not persist");
 
             var args = method.GetParameters().Select(p =>
@@ -1064,6 +1063,21 @@ public sealed class WebCoverageHarness
             bufferField.SetValue(page, mvc.GetService(bufferField.FieldType));
         page.DiagnosticSource ??= mvc.GetService<DiagnosticSource>();
         page.HtmlEncoder ??= HtmlEncoder.Default;
+        foreach (var propertyName in new[] { "MetadataProvider", "ModelExpressionProvider", "Json" })
+        {
+            try
+            {
+                var prop = razorType.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public);
+                if (prop?.GetValue(page) != null || prop?.SetMethod == null)
+                    continue;
+                var value = mvc.GetService(prop.PropertyType);
+                if (value != null)
+                    prop.SetValue(page, value);
+            }
+            catch
+            {
+            }
+        }
         try
         {
             var url = mvc.GetService<IUrlHelperFactory>()?.GetUrlHelper(page.ViewContext)
@@ -1141,7 +1155,9 @@ public sealed class WebCoverageHarness
                     }
                     else if (propertyType.IsInterface)
                     {
-                        value = _services.GetService(propertyType) ?? EmptyProxy.Create(propertyType, viewContext);
+                        value = MvcServices.Value.GetService(propertyType)
+                                ?? _services.GetService(propertyType)
+                                ?? EmptyProxy.Create(propertyType, viewContext);
                     }
                     else
                     {

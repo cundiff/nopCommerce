@@ -1345,6 +1345,12 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                     addModel.Quantity = 1;
                     orderController.ModelState.Clear();
                     await orderController.AddProductToOrderDetails(order.Id, product.Id, addModel, harness.CreateForm());
+                    var plainForOrder = await harness.EnsurePlainProductAsync();
+                    var plainAdd = await orderFactory.PrepareAddProductToOrderModelAsync(
+                        new global::Nop.Web.Areas.Admin.Models.Orders.AddProductToOrderModel(), order, plainForOrder);
+                    plainAdd.Quantity = 1;
+                    orderController.ModelState.Clear();
+                    await orderController.AddProductToOrderDetails(order.Id, plainForOrder.Id, plainAdd, harness.CreateForm());
                 });
 
                 await Try(async () =>
