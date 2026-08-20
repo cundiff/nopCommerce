@@ -586,7 +586,6 @@ public sealed class WebCoverageHarness
                || name.Contains("Import", StringComparison.OrdinalIgnoreCase)
                || name.Contains("ClearCache", StringComparison.OrdinalIgnoreCase)
                || name.Contains("GenerateAll", StringComparison.OrdinalIgnoreCase)
-               || name.Contains("Export", StringComparison.OrdinalIgnoreCase)
                || name.Contains("Rss", StringComparison.OrdinalIgnoreCase)
                || name.Contains("Restart", StringComparison.OrdinalIgnoreCase)
                || name.Contains("Sitemap", StringComparison.OrdinalIgnoreCase)
@@ -711,9 +710,9 @@ public sealed class WebCoverageHarness
         if (type == typeof(Guid))
             return Guid.Empty;
         if (type == typeof(DateTime))
-            return DateTime.UtcNow;
+            return DateTime.SpecifyKind(DateTime.Now, DateTimeKind.Unspecified);
         if (type == typeof(DateTimeOffset))
-            return DateTimeOffset.UtcNow;
+            return DateTimeOffset.Now;
         if (type.IsEnum)
             return Enum.GetValues(type).GetValue(0);
         if (type == typeof(CancellationToken))
@@ -815,12 +814,12 @@ public sealed class WebCoverageHarness
                 else if ((prop.Name.Contains("StartDate", StringComparison.Ordinal) || prop.Name == "From")
                          && (prop.PropertyType == typeof(DateTime) || prop.PropertyType == typeof(DateTime?)))
                 {
-                    prop.SetValue(model, DateTime.UtcNow.AddYears(-1));
+                    prop.SetValue(model, DateTime.SpecifyKind(DateTime.Now.AddYears(-1), DateTimeKind.Unspecified));
                 }
                 else if ((prop.Name.Contains("EndDate", StringComparison.Ordinal) || prop.Name == "To")
                          && (prop.PropertyType == typeof(DateTime) || prop.PropertyType == typeof(DateTime?)))
                 {
-                    prop.SetValue(model, DateTime.UtcNow.AddDays(1));
+                    prop.SetValue(model, DateTime.SpecifyKind(DateTime.Now.AddDays(1), DateTimeKind.Unspecified));
                 }
                 else if (prop.Name == "ShipToSameAddress" && prop.PropertyType == typeof(bool))
                 {

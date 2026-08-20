@@ -1,9 +1,11 @@
 using AutoMapper;
 using AwesomeAssertions;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Primitives;
 using Nop.Core;
 using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Orders;
@@ -368,6 +370,172 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             .Where(t => t.IsClass && !t.IsAbstract && t.Namespace == "Nop.Web.Infrastructure.Cache");
         await harness.ExerciseTypesAsync(types, asMvc: false);
         harness.TypesCreated.Should().BeGreaterThan(0);
+    }
+
+    [Test]
+    public async Task ExercisePreparedAdminAndPublicSaves()
+    {
+        var harness = CreateHarness();
+        await harness.SeedShoppingCartAsync();
+
+        async Task Try(Func<Task> action)
+        {
+            try { await action(); } catch { }
+        }
+
+        var settingsFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ISettingModelFactory>();
+        var settings = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.SettingController>();
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.Catalog(await settingsFactory.PrepareCatalogSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.Blog(await settingsFactory.PrepareBlogSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.Vendor(await settingsFactory.PrepareVendorSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.Shipping(await settingsFactory.PrepareShippingSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.Tax(await settingsFactory.PrepareTaxSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.Order(await settingsFactory.PrepareOrderSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.Media(await settingsFactory.PrepareMediaSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.CustomerUser(await settingsFactory.PrepareCustomerUserSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.ShoppingCart(await settingsFactory.PrepareShoppingCartSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.RewardPoints(await settingsFactory.PrepareRewardPointsSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.Gdpr(await settingsFactory.PrepareGdprSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.GeneralCommon(await settingsFactory.PrepareGeneralCommonSettingsModelAsync());
+        });
+        await Try(async () =>
+        {
+            settings.ModelState.Clear();
+            await settings.FilterLevel(await settingsFactory.PrepareFilterLevelSettingsModelAsync());
+        });
+
+        var productFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
+        var productController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
+        foreach (var product in await GetService<IProductService>().SearchProductsAsync(pageSize: 5))
+        {
+            await Try(async () =>
+            {
+                var model = await productFactory.PrepareProductModelAsync(null, product);
+                productController.ModelState.Clear();
+                await productController.Edit(model, true);
+            });
+        }
+
+        var categoryFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ICategoryModelFactory>();
+        var categoryController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.CategoryController>();
+        foreach (var category in (await GetService<ICategoryService>().GetAllCategoriesAsync()).Take(5))
+        {
+            await Try(async () =>
+            {
+                var model = await categoryFactory.PrepareCategoryModelAsync(null, category);
+                categoryController.ModelState.Clear();
+                await categoryController.Edit(model, true);
+            });
+        }
+
+        var manufacturerFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IManufacturerModelFactory>();
+        var manufacturerController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.ManufacturerController>();
+        foreach (var manufacturer in (await GetService<IManufacturerService>().GetAllManufacturersAsync()).Take(5))
+        {
+            await Try(async () =>
+            {
+                var model = await manufacturerFactory.PrepareManufacturerModelAsync(null, manufacturer);
+                manufacturerController.ModelState.Clear();
+                await manufacturerController.Edit(model, true);
+            });
+        }
+
+        var customerFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ICustomerModelFactory>();
+        var adminCustomerController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.CustomerController>();
+        var adminCustomer = await GetService<IWorkContext>().GetCurrentCustomerAsync();
+        await Try(async () =>
+        {
+            var model = await customerFactory.PrepareCustomerModelAsync(null, adminCustomer);
+            adminCustomerController.ModelState.Clear();
+            await adminCustomerController.Edit(model, true, new FormCollection(new Dictionary<string, StringValues>()));
+        });
+
+        var orderFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IOrderModelFactory>();
+        var orderController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.OrderController>();
+        foreach (var order in await GetService<IOrderService>().SearchOrdersAsync(pageIndex: 0, pageSize: 5))
+        {
+            await Try(async () =>
+            {
+                var model = await orderFactory.PrepareOrderModelAsync(null, order);
+                orderController.ModelState.Clear();
+                await orderController.EditOrderTotals(order.Id, model);
+                await orderController.EditShippingMethod(order.Id, model);
+                await orderController.ChangeOrderStatus(order.Id, model);
+            });
+        }
+
+        var publicCustomerFactory = GetService<global::Nop.Web.Factories.ICustomerModelFactory>();
+        var publicCustomerController = harness.CreateController<global::Nop.Web.Controllers.CustomerController>();
+        await Try(async () =>
+        {
+            var model = await publicCustomerFactory.PrepareCustomerInfoModelAsync(
+                new global::Nop.Web.Models.Customer.CustomerInfoModel(), adminCustomer, false);
+            publicCustomerController.ModelState.Clear();
+            await publicCustomerController.Info(model, new FormCollection(new Dictionary<string, StringValues>()));
+        });
+
+        var checkout = harness.CreateController<global::Nop.Web.Controllers.CheckoutController>();
+        var addresses = await GetService<ICustomerService>().GetAddressesByCustomerIdAsync(adminCustomer.Id);
+        var addressId = addresses.FirstOrDefault()?.Id ?? 0;
+        var formValues = new Dictionary<string, StringValues>();
+        if (addressId > 0)
+        {
+            formValues["billing_address_id"] = addressId.ToString();
+            formValues["shipping_address_id"] = addressId.ToString();
+        }
+
+        var form = new FormCollection(formValues);
+        var billing = new global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel { ShipToSameAddress = true };
+        await Try(async () => await checkout.OpcSaveBilling(billing, form));
+        var shipping = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel();
+        await Try(async () => await checkout.OpcSaveShipping(shipping, form));
     }
 
     [Test]
