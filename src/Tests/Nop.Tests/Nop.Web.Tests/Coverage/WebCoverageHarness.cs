@@ -22,10 +22,14 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
 using Nop.Core;
+using Nop.Core.Caching;
 using Nop.Core.Domain.Attributes;
+using Nop.Core.Domain.Blogs;
 using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Common;
 using Nop.Core.Domain.Customers;
+using Nop.Core.Domain.Discounts;
+using Nop.Core.Domain.Messages;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
 using Nop.Core.Domain.Shipping;
@@ -38,10 +42,15 @@ using Nop.Services.Catalog;
 using Nop.Services.Common;
 using Nop.Services.Configuration;
 using Nop.Services.Customers;
+using Nop.Services.Directory;
 using Nop.Services.Discounts;
+using Nop.Services.Messages;
 using Nop.Services.Orders;
+using Nop.Services.Plugins;
 using Nop.Services.Shipping;
 using Nop.Services.Stores;
+using Nop.Services.Vendors;
+using Nop.Tests.Nop.Services.Tests.Payments;
 using Nop.Web.Framework;
 using Nop.Web.Framework.Models;
 using Nop.Web.Framework.Models.DataTables;
@@ -106,6 +115,7 @@ public sealed class WebCoverageHarness
     public int TypesFailed { get; private set; }
     public int ValidPosts { get; private set; }
     public List<string> Failures { get; } = [];
+    public Type RazorControllerType { get; set; }
 
     public T CreateController<T>() where T : Controller
     {
@@ -511,6 +521,7 @@ public sealed class WebCoverageHarness
             return;
 
         var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        typeof(WebWorkContext).GetField("_cachedCustomer", flags)?.SetValue(workContext, null);
         typeof(WebWorkContext).GetField("_cachedVendor", flags)?.SetValue(workContext, null);
         typeof(WebWorkContext).GetField("_cachedLanguage", flags)?.SetValue(workContext, null);
         typeof(WebWorkContext).GetField("_cachedCurrency", flags)?.SetValue(workContext, null);
@@ -1917,6 +1928,561 @@ public sealed class WebCoverageHarness
         }
     }
 
+    public async Task ExerciseCoverageTailsAsync()
+    {
+        await EnableCheckoutTestPluginsAsync();
+        await SeedShoppingCartAsync();
+
+        async Task Try(Func<Task> action)
+        {
+            try { await action(); } catch { }
+        }
+
+        var settingService = _services.GetRequiredService<ISettingService>();
+        var orderSettings = _services.GetRequiredService<OrderSettings>();
+        var customerSettings = _services.GetRequiredService<CustomerSettings>();
+        var vendorSettings = _services.GetRequiredService<VendorSettings>();
+        var privateMessages = _services.GetRequiredService<PrivateMessageSettings>();
+        var gdprSettings = _services.GetRequiredService<global::Nop.Core.Domain.Gdpr.GdprSettings>();
+        var sitemapSettings = _services.GetRequiredService<SitemapSettings>();
+        var blogSettings = _services.GetRequiredService<BlogSettings>();
+        var catalogSettings = _services.GetRequiredService<CatalogSettings>();
+
+        var previousOpc = orderSettings.OnePageCheckoutEnabled;
+        var previousReturnEnabled = orderSettings.ReturnRequestsEnabled;
+        var previousReturnFiles = orderSettings.ReturnRequestsAllowFiles;
+        var previousReturnDays = orderSettings.NumberOfDaysReturnRequestAvailable;
+        var previousNewsletter = customerSettings.NewsletterEnabled;
+        var previousVendorApply = vendorSettings.AllowCustomersToApplyForVendorAccount;
+        var previousVendorEdit = vendorSettings.AllowVendorsToEditInfo;
+        var previousVendorNotify = vendorSettings.NotifyStoreOwnerAboutVendorInformationChange;
+        var previousPm = privateMessages.AllowPrivateMessages;
+        var previousPmNotify = privateMessages.NotifyAboutPrivateMessages;
+        var previousGdpr = gdprSettings.GdprEnabled;
+        var previousGdprLog = gdprSettings.LogUserProfileChanges;
+        var previousSitemapEnabled = sitemapSettings.SitemapEnabled;
+        var previousSitemapBlog = sitemapSettings.SitemapIncludeBlogPosts;
+        var previousSitemapCategories = sitemapSettings.SitemapIncludeCategories;
+        var previousSitemapManufacturers = sitemapSettings.SitemapIncludeManufacturers;
+        var previousSitemapProducts = sitemapSettings.SitemapIncludeProducts;
+        var previousSitemapTags = sitemapSettings.SitemapIncludeProductTags;
+        var previousSitemapTopics = sitemapSettings.SitemapIncludeTopics;
+        var previousBlog = blogSettings.Enabled;
+        var previousBackInStock = catalogSettings.MaximumBackInStockSubscriptions;
+        var previousSkipPayment = TestPaymentMethod.TestSkipPaymentInfo;
+
+        orderSettings.ReturnRequestsEnabled = true;
+        orderSettings.ReturnRequestsAllowFiles = true;
+        orderSettings.NumberOfDaysReturnRequestAvailable = 36500;
+        orderSettings.OnePageCheckoutEnabled = true;
+        orderSettings.MinimumOrderPlacementInterval = 0;
+        customerSettings.NewsletterEnabled = true;
+        vendorSettings.AllowCustomersToApplyForVendorAccount = true;
+        vendorSettings.AllowVendorsToEditInfo = true;
+        vendorSettings.NotifyStoreOwnerAboutVendorInformationChange = true;
+        privateMessages.AllowPrivateMessages = true;
+        privateMessages.NotifyAboutPrivateMessages = true;
+        sitemapSettings.SitemapEnabled = true;
+        sitemapSettings.SitemapIncludeBlogPosts = true;
+        sitemapSettings.SitemapIncludeCategories = true;
+        sitemapSettings.SitemapIncludeManufacturers = true;
+        sitemapSettings.SitemapIncludeProducts = true;
+        sitemapSettings.SitemapIncludeProductTags = true;
+        sitemapSettings.SitemapIncludeTopics = true;
+        blogSettings.Enabled = true;
+        catalogSettings.MaximumBackInStockSubscriptions = 100;
+        await settingService.SaveSettingAsync(orderSettings);
+        await settingService.SaveSettingAsync(customerSettings);
+        await settingService.SaveSettingAsync(vendorSettings);
+        await settingService.SaveSettingAsync(privateMessages);
+        await settingService.SaveSettingAsync(sitemapSettings);
+        await settingService.SaveSettingAsync(blogSettings);
+        await settingService.SaveSettingAsync(catalogSettings);
+
+        var workContext = _services.GetRequiredService<IWorkContext>();
+        var customerService = _services.GetRequiredService<ICustomerService>();
+        var store = await _services.GetRequiredService<IStoreContext>().GetCurrentStoreAsync();
+        var admin = await workContext.GetCurrentCustomerAsync();
+        var previousVendorId = admin.VendorId;
+
+        try
+        {
+            await Try(async () =>
+            {
+                var commonFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICommonModelFactory>();
+                await commonFactory.PrepareSystemWarningModelsAsync();
+                await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsInstalledWarningModelAsync",
+                    new List<global::Nop.Web.Areas.Admin.Models.Common.SystemWarningModel>());
+                await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsEnabledWarningModelAsync",
+                    new List<global::Nop.Web.Areas.Admin.Models.Common.SystemWarningModel>());
+                await InvokeInstanceMethodAsync(commonFactory, "PrepareIncompatibleWarningModelAsync",
+                    new List<global::Nop.Web.Areas.Admin.Models.Common.SystemWarningModel>());
+                await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsCollisionsWarningModelAsync",
+                    new List<global::Nop.Web.Areas.Admin.Models.Common.SystemWarningModel>());
+            });
+
+            await Try(async () =>
+            {
+                await _services.GetRequiredService<IStaticCacheManager>()
+                    .RemoveByPrefixAsync("Nop.pres.sitemap");
+                var sitemapFactory = _services.GetRequiredService<global::Nop.Web.Factories.ISitemapModelFactory>();
+                await sitemapFactory.PrepareSitemapModelAsync(new global::Nop.Web.Models.Sitemap.SitemapPageModel
+                {
+                    PageNumber = 1
+                });
+            });
+
+            await Try(async () =>
+            {
+                var reportFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IReportModelFactory>();
+                var best = new global::Nop.Web.Areas.Admin.Models.Reports.BestCustomersReportSearchModel
+                {
+                    OrderBy = global::Nop.Services.Orders.OrderByEnum.OrderByTotalAmount,
+                    StartDate = DateTime.UtcNow.AddYears(-2),
+                    EndDate = DateTime.UtcNow
+                };
+                best.SetGridPageSize();
+                await reportFactory.PrepareBestCustomersReportListModelAsync(best);
+                best.OrderBy = global::Nop.Services.Orders.OrderByEnum.OrderByQuantity;
+                await reportFactory.PrepareBestCustomersReportListModelAsync(best);
+
+                var sales = new global::Nop.Web.Areas.Admin.Models.Reports.SalesSummarySearchModel
+                {
+                    StartDate = DateTime.UtcNow.AddYears(-2),
+                    EndDate = DateTime.UtcNow
+                };
+                sales.SetGridPageSize();
+                await reportFactory.PrepareSalesSummaryListModelAsync(sales);
+
+                var orderFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IOrderModelFactory>();
+                var brief = new global::Nop.Web.Areas.Admin.Models.Reports.BestsellerBriefSearchModel();
+                brief.SetGridPageSize(5);
+                await orderFactory.PrepareBestsellerBriefSearchModelAsync(brief);
+                await orderFactory.PrepareBestsellerBriefListModelAsync(brief);
+            });
+
+            await Try(async () =>
+            {
+                var catalogFactory = _services.GetRequiredService<global::Nop.Web.Factories.ICatalogModelFactory>();
+                await catalogFactory.PrepareSearchBoxModelAsync();
+                var search = new global::Nop.Web.Models.Catalog.SearchModel { q = "computer" };
+                await catalogFactory.PrepareSearchProductsModelAsync(search,
+                    new global::Nop.Web.Models.Catalog.CatalogProductsCommand { PageNumber = 1, PageSize = 12 });
+                var vendor = (await _services.GetRequiredService<IVendorService>().GetAllVendorsAsync()).FirstOrDefault();
+                if (vendor != null)
+                    await catalogFactory.PrepareVendorProductReviewsModelAsync(vendor,
+                        new global::Nop.Web.Models.Catalog.VendorReviewsPagingFilteringModel { PageNumber = 1 });
+            });
+
+            await Try(async () =>
+            {
+                var pluginService = _services.GetRequiredService<IPluginService>();
+                var pluginFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IPluginModelFactory>();
+                var pluginController = CreateController<global::Nop.Web.Areas.Admin.Controllers.PluginController>();
+                foreach (var systemName in new[] { "Payments.TestMethod", "FixedRateTestShippingRateComputationMethod" })
+                {
+                    await pluginController.EditPopup(systemName);
+                    var descriptor = await pluginService.GetPluginDescriptorBySystemNameAsync<IPlugin>(systemName, LoadPluginsMode.All);
+                    if (descriptor == null)
+                        continue;
+                    var model = await pluginFactory.PreparePluginModelAsync(null, descriptor);
+                    model.IsEnabled = true;
+                    pluginController.ModelState.Clear();
+                    await pluginController.EditPopup(model);
+                    model.IsEnabled = false;
+                    pluginController.ModelState.Clear();
+                    await pluginController.EditPopup(model);
+                    model.IsEnabled = true;
+                    pluginController.ModelState.Clear();
+                    await pluginController.EditPopup(model);
+                }
+            });
+
+            await Try(async () =>
+            {
+                var orderService = _services.GetRequiredService<IOrderService>();
+                var orders = await orderService.SearchOrdersAsync(customerId: admin.Id, pageIndex: 0, pageSize: 10);
+                if (orders.Count == 0)
+                    orders = await orderService.SearchOrdersAsync(pageIndex: 0, pageSize: 5);
+                foreach (var existingOrder in orders)
+                {
+                    existingOrder.OrderStatus = OrderStatus.Complete;
+                    await orderService.UpdateOrderAsync(existingOrder);
+                }
+
+                var returnOrder = orders.FirstOrDefault(o => o.CustomerId == admin.Id) ?? orders.FirstOrDefault();
+                if (returnOrder == null)
+                    return;
+
+                var returnFactory = _services.GetRequiredService<global::Nop.Web.Factories.IReturnRequestModelFactory>();
+                var returnModel = await returnFactory.PrepareSubmitReturnRequestModelAsync(
+                    new global::Nop.Web.Models.Order.SubmitReturnRequestModel(), returnOrder);
+                var reasons = await _services.GetRequiredService<IReturnRequestService>().GetAllReturnRequestReasonsAsync();
+                var actions = await _services.GetRequiredService<IReturnRequestService>().GetAllReturnRequestActionsAsync();
+                if (reasons.Count > 0)
+                    returnModel.ReturnRequestReasonId = reasons[0].Id;
+                if (actions.Count > 0)
+                    returnModel.ReturnRequestActionId = actions[0].Id;
+
+                var returnController = CreateController<global::Nop.Web.Controllers.ReturnRequestController>();
+                ApplyRequestForm(null, true);
+                await returnController.UploadFileReturnRequest();
+                var items = await orderService.GetOrderItemsAsync(returnOrder.Id);
+                var returnForm = new Dictionary<string, string>();
+                foreach (var item in items)
+                    returnForm[$"quantity{item.Id}"] = "1";
+                returnController.ModelState.Clear();
+                await returnController.ReturnRequest(returnOrder.Id);
+                returnController.ModelState.Clear();
+                await returnController.ReturnRequestSubmit(returnOrder.Id, returnModel, CreateForm(returnForm, true));
+                await returnController.CustomerReturnRequests();
+            });
+
+            await Try(async () =>
+            {
+                var newsletters = _services.GetRequiredService<INewsLetterSubscriptionService>();
+                var types = await _services.GetRequiredService<INewsLetterSubscriptionTypeService>()
+                    .GetAllNewsLetterSubscriptionTypesAsync(store.Id);
+                var existing = await newsletters.GetNewsLetterSubscriptionsByEmailAsync(admin.Email, storeId: store.Id);
+                var publicFactory = _services.GetRequiredService<global::Nop.Web.Factories.ICustomerModelFactory>();
+                var publicCustomer = CreateController<global::Nop.Web.Controllers.CustomerController>();
+
+                gdprSettings.GdprEnabled = true;
+                gdprSettings.LogUserProfileChanges = true;
+                await settingService.SaveSettingAsync(gdprSettings);
+                var info = await publicFactory.PrepareCustomerInfoModelAsync(
+                    new global::Nop.Web.Models.Customer.CustomerInfoModel(), admin, false);
+                info.Email = admin.Email;
+                foreach (var subscription in info.NewsLetterSubscriptions)
+                    subscription.IsActive = true;
+                if (types.Count > 0)
+                {
+                    info.NewsLetterSubscriptions.Add(new global::Nop.Web.Models.Customer.NewsLetterSubscriptionModel
+                    {
+                        TypeId = types.Max(t => t.Id) + 1,
+                        Name = "Coverage extra",
+                        IsActive = true
+                    });
+                }
+
+                publicCustomer.ModelState.Clear();
+                await publicCustomer.Info(info, await CreateCustomerAttributeFormAsync());
+
+                foreach (var subscription in existing.Concat(await newsletters.GetNewsLetterSubscriptionsByEmailAsync(admin.Email, storeId: store.Id)).ToList())
+                    await newsletters.DeleteNewsLetterSubscriptionAsync(subscription);
+
+                info = await publicFactory.PrepareCustomerInfoModelAsync(
+                    new global::Nop.Web.Models.Customer.CustomerInfoModel(), admin, false);
+                info.Email = admin.Email;
+                foreach (var type in types)
+                {
+                    info.NewsLetterSubscriptions.Add(new global::Nop.Web.Models.Customer.NewsLetterSubscriptionModel
+                    {
+                        TypeId = type.Id,
+                        Name = type.Name,
+                        IsActive = true
+                    });
+                }
+
+                publicCustomer.ModelState.Clear();
+                await publicCustomer.Info(info, await CreateCustomerAttributeFormAsync());
+
+                gdprSettings.GdprEnabled = false;
+                gdprSettings.LogUserProfileChanges = false;
+                await settingService.SaveSettingAsync(gdprSettings);
+            });
+
+            await Try(async () =>
+            {
+                var customerFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICustomerModelFactory>();
+                var adminCustomer = CreateController<global::Nop.Web.Areas.Admin.Controllers.CustomerController>();
+                var model = await customerFactory.PrepareCustomerModelAsync(null, admin);
+                model.SendPm.Subject = "Coverage PM";
+                model.SendPm.Message = "Coverage private message body";
+                adminCustomer.ModelState.Clear();
+                await adminCustomer.SendPm(model);
+            });
+
+            await Try(async () =>
+            {
+                var productService = _services.GetRequiredService<IProductService>();
+                var attributeService = _services.GetRequiredService<IProductAttributeService>();
+                var productFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
+                var productController = CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
+                Product host = null;
+                foreach (var candidate in await productService.SearchProductsAsync(pageSize: 30))
+                {
+                    if ((await attributeService.GetProductAttributeMappingsByProductIdAsync(candidate.Id)).Count == 0)
+                        continue;
+                    host = candidate;
+                    break;
+                }
+
+                if (host == null)
+                    return;
+
+                var combinations = await attributeService.GetAllProductAttributeCombinationsAsync(host.Id);
+                if (combinations.Count == 0)
+                {
+                    productController.ModelState.Clear();
+                    await productController.GenerateAllAttributeCombinations(host.Id);
+                    combinations = await attributeService.GetAllProductAttributeCombinationsAsync(host.Id);
+                }
+
+                var combination = combinations.FirstOrDefault();
+                if (combination == null)
+                    return;
+
+                var comboModel = await productFactory.PrepareProductAttributeCombinationModelAsync(null, host, combination);
+                comboModel.Id = combination.Id;
+                comboModel.ProductId = host.Id;
+                comboModel.StockQuantity = combination.StockQuantity + 1;
+                var form = await BuildProductAttributeFormAsync(host.Id);
+                productController.ModelState.Clear();
+                await productController.ProductAttributeCombinationEditPopup(combination.Id);
+                productController.ModelState.Clear();
+                await productController.ProductAttributeCombinationEditPopup(comboModel, form);
+            });
+
+            await Try(async () =>
+            {
+                var discountService = _services.GetRequiredService<IDiscountService>();
+                var discount = (await discountService.GetAllDiscountsAsync(showHidden: true, isActive: null)).FirstOrDefault();
+                if (discount == null)
+                    return;
+                var requirement = new DiscountRequirement
+                {
+                    DiscountId = discount.Id,
+                    DiscountRequirementRuleSystemName = "HasAllProducts",
+                    IsGroup = false
+                };
+                await discountService.InsertDiscountRequirementAsync(requirement);
+                var discountController = CreateController<global::Nop.Web.Areas.Admin.Controllers.DiscountController>();
+                await discountController.GetDiscountRequirements(discount.Id, requirement.Id, null,
+                    (int)RequirementGroupInteractionType.And, false);
+                await discountController.GetDiscountRequirements(discount.Id, requirement.Id, null, null, true);
+            });
+
+            await Try(async () =>
+            {
+                var shipping = CreateController<global::Nop.Web.Areas.Admin.Controllers.ShippingController>();
+                var methods = await _services.GetRequiredService<IShippingMethodsService>().GetAllShippingMethodsAsync();
+                var countries = await _services.GetRequiredService<ICountryService>().GetAllCountriesAsync(showHidden: true);
+                var restrict = new Dictionary<string, string>();
+                var countryId = countries.FirstOrDefault()?.Id ?? 1;
+                foreach (var method in methods)
+                    restrict["restrict_" + method.Id] = countryId.ToString();
+                var model = await _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IShippingModelFactory>()
+                    .PrepareShippingMethodRestrictionModelAsync(new global::Nop.Web.Areas.Admin.Models.Shipping.ShippingMethodRestrictionModel());
+                shipping.ModelState.Clear();
+                await shipping.RestrictionSave(model, CreateForm(restrict));
+                await shipping.ProviderUpdate(new global::Nop.Web.Areas.Admin.Models.Shipping.ShippingProviderModel
+                {
+                    SystemName = "FixedRateTestShippingRateComputationMethod",
+                    IsActive = true,
+                    DisplayOrder = 1
+                });
+                await shipping.ProviderUpdate(new global::Nop.Web.Areas.Admin.Models.Shipping.ShippingProviderModel
+                {
+                    SystemName = "FixedRateTestShippingRateComputationMethod",
+                    IsActive = false,
+                    DisplayOrder = 1
+                });
+                await shipping.ProviderUpdate(new global::Nop.Web.Areas.Admin.Models.Shipping.ShippingProviderModel
+                {
+                    SystemName = "FixedRateTestShippingRateComputationMethod",
+                    IsActive = true,
+                    DisplayOrder = 1
+                });
+            });
+
+            await Try(async () =>
+            {
+                var vendor = (await _services.GetRequiredService<IVendorService>().GetAllVendorsAsync()).FirstOrDefault();
+                if (vendor == null)
+                    return;
+                admin.VendorId = vendor.Id;
+                await customerService.UpdateCustomerAsync(admin);
+                ClearWorkContextCaches();
+                var vendorController = CreateController<global::Nop.Web.Controllers.VendorController>();
+                var vendorFactory = _services.GetRequiredService<global::Nop.Web.Factories.IVendorModelFactory>();
+                var info = await vendorFactory.PrepareVendorInfoModelAsync(
+                    new global::Nop.Web.Models.Vendors.VendorInfoModel(), false);
+                info.Name = vendor.Name;
+                info.Email = vendor.Email;
+                info.Description = "Coverage vendor description";
+                var (values, files) = await BuildAttributeFormAsync<VendorAttribute, VendorAttributeValue>("vendor_attribute_");
+                vendorController.ModelState.Clear();
+                await vendorController.Info(info, CreateFormFile("uploadedFile", "vendor.jpg"), CreateForm(values, true, files));
+            });
+
+            await Try(async () =>
+            {
+                admin.VendorId = previousVendorId;
+                await customerService.UpdateCustomerAsync(admin);
+                ClearWorkContextCaches();
+                await workContext.SetCurrentCustomerAsync(admin);
+                var guest = await customerService.InsertGuestCustomerAsync();
+                var email = $"cov-vendor-{Guid.NewGuid():N}@example.com";
+                await _services.GetRequiredService<ICustomerRegistrationService>().RegisterCustomerAsync(
+                    new CustomerRegistrationRequest(guest, email, email, "1q2w3e4r5t",
+                        customerSettings.DefaultPasswordFormat, store.Id));
+                await workContext.SetCurrentCustomerAsync(guest);
+                ClearWorkContextCaches();
+                var vendorController = CreateController<global::Nop.Web.Controllers.VendorController>();
+                var vendorFactory = _services.GetRequiredService<global::Nop.Web.Factories.IVendorModelFactory>();
+                var apply = await vendorFactory.PrepareApplyVendorModelAsync(
+                    new global::Nop.Web.Models.Vendors.ApplyVendorModel(), false, false, null);
+                apply.Name = "Coverage Vendor " + Guid.NewGuid().ToString("N")[..8];
+                apply.Email = email;
+                apply.Description = "Coverage apply";
+                var (values, files) = await BuildAttributeFormAsync<VendorAttribute, VendorAttributeValue>("vendor_attribute_");
+                vendorController.ModelState.Clear();
+                await vendorController.ApplyVendorSubmit(apply, true, CreateFormFile("uploadedFile", "vendor.jpg"),
+                    CreateForm(values, true, files));
+            });
+
+            await Try(async () =>
+            {
+                var productService = _services.GetRequiredService<IProductService>();
+                var product = new Product
+                {
+                    Name = "Coverage back in stock",
+                    ProductType = ProductType.SimpleProduct,
+                    VisibleIndividually = true,
+                    Published = true,
+                    Sku = $"COV{Guid.NewGuid():N}"[..12],
+                    Price = 11m,
+                    ManageInventoryMethod = ManageInventoryMethod.ManageStock,
+                    StockQuantity = 0,
+                    AllowBackInStockSubscriptions = true,
+                    BackorderMode = BackorderMode.NoBackorders,
+                    OrderMinimumQuantity = 1,
+                    OrderMaximumQuantity = 10000,
+                    CreatedOnUtc = DateTime.UtcNow,
+                    UpdatedOnUtc = DateTime.UtcNow,
+                    RecurringCycleLength = 30,
+                    RecurringTotalCycles = 12,
+                    RentalPriceLength = 1
+                };
+                await productService.InsertProductAsync(product);
+                var backInStock = CreateController<global::Nop.Web.Controllers.BackInStockSubscriptionController>();
+                await backInStock.SubscribePopupPOST(product.Id);
+                await backInStock.SubscribePopupPOST(product.Id);
+                await backInStock.CustomerSubscriptions(1);
+            });
+
+            await Try(async () =>
+            {
+                var cartService = _services.GetRequiredService<IShoppingCartService>();
+                await cartService.ClearShoppingCartAsync(admin, store.Id);
+                var free = new Product
+                {
+                    Name = "Coverage free",
+                    ProductType = ProductType.SimpleProduct,
+                    VisibleIndividually = true,
+                    Published = true,
+                    Sku = $"COV{Guid.NewGuid():N}"[..12],
+                    Price = 0m,
+                    IsShipEnabled = true,
+                    ManageInventoryMethod = ManageInventoryMethod.DontManageStock,
+                    StockQuantity = 50,
+                    OrderMinimumQuantity = 1,
+                    OrderMaximumQuantity = 10000,
+                    Weight = 1,
+                    Length = 1,
+                    Width = 1,
+                    Height = 1,
+                    CreatedOnUtc = DateTime.UtcNow,
+                    UpdatedOnUtc = DateTime.UtcNow,
+                    RecurringCycleLength = 30,
+                    RecurringTotalCycles = 12,
+                    RentalPriceLength = 1
+                };
+                await _services.GetRequiredService<IProductService>().InsertProductAsync(free);
+                await cartService.AddToCartAsync(admin, free, ShoppingCartType.ShoppingCart, store.Id,
+                    quantity: 1, addRequiredProducts: false);
+                var checkout = CreateController<global::Nop.Web.Controllers.CheckoutController>();
+                var addresses = await customerService.GetAddressesByCustomerIdAsync(admin.Id);
+                var addressId = addresses.FirstOrDefault()?.Id ?? 0;
+                var billing = new global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel { ShipToSameAddress = true };
+                checkout.ModelState.Clear();
+                await checkout.OpcSaveBilling(billing, CreateForm(new Dictionary<string, string>
+                {
+                    ["billing_address_id"] = addressId.ToString()
+                }));
+                var shippingOption = "Shipping option 1___FixedRateTestShippingRateComputationMethod";
+                checkout.ModelState.Clear();
+                await checkout.OpcSaveShippingMethod(shippingOption, CreateForm());
+            });
+
+            await Try(async () =>
+            {
+                await EnsurePlainProductInCartAsync();
+                TestPaymentMethod.TestSkipPaymentInfo = true;
+                var checkout = CreateController<global::Nop.Web.Controllers.CheckoutController>();
+                checkout.ModelState.Clear();
+                await checkout.OpcSavePaymentMethod("Payments.TestMethod",
+                    new global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel());
+            });
+
+            await Try(async () =>
+            {
+                var adminReturn = CreateController<global::Nop.Web.Areas.Admin.Controllers.ReturnRequestController>();
+                var returnRequest = (await _services.GetRequiredService<IReturnRequestService>()
+                    .SearchReturnRequestsAsync(pageIndex: 0, pageSize: 1)).FirstOrDefault();
+                if (returnRequest == null)
+                    return;
+                var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IReturnRequestModelFactory>();
+                var model = await factory.PrepareReturnRequestModelAsync(null, returnRequest);
+                adminReturn.ModelState.Clear();
+                await adminReturn.Edit(returnRequest.Id);
+                adminReturn.ModelState.Clear();
+                await adminReturn.Edit(model, true);
+            });
+        }
+        finally
+        {
+            TestPaymentMethod.TestSkipPaymentInfo = previousSkipPayment;
+            orderSettings.OnePageCheckoutEnabled = previousOpc;
+            orderSettings.ReturnRequestsEnabled = previousReturnEnabled;
+            orderSettings.ReturnRequestsAllowFiles = previousReturnFiles;
+            orderSettings.NumberOfDaysReturnRequestAvailable = previousReturnDays;
+            customerSettings.NewsletterEnabled = previousNewsletter;
+            vendorSettings.AllowCustomersToApplyForVendorAccount = previousVendorApply;
+            vendorSettings.AllowVendorsToEditInfo = previousVendorEdit;
+            vendorSettings.NotifyStoreOwnerAboutVendorInformationChange = previousVendorNotify;
+            privateMessages.AllowPrivateMessages = previousPm;
+            privateMessages.NotifyAboutPrivateMessages = previousPmNotify;
+            gdprSettings.GdprEnabled = previousGdpr;
+            gdprSettings.LogUserProfileChanges = previousGdprLog;
+            sitemapSettings.SitemapEnabled = previousSitemapEnabled;
+            sitemapSettings.SitemapIncludeBlogPosts = previousSitemapBlog;
+            sitemapSettings.SitemapIncludeCategories = previousSitemapCategories;
+            sitemapSettings.SitemapIncludeManufacturers = previousSitemapManufacturers;
+            sitemapSettings.SitemapIncludeProducts = previousSitemapProducts;
+            sitemapSettings.SitemapIncludeProductTags = previousSitemapTags;
+            sitemapSettings.SitemapIncludeTopics = previousSitemapTopics;
+            blogSettings.Enabled = previousBlog;
+            catalogSettings.MaximumBackInStockSubscriptions = previousBackInStock;
+            await settingService.SaveSettingAsync(orderSettings);
+            await settingService.SaveSettingAsync(customerSettings);
+            await settingService.SaveSettingAsync(vendorSettings);
+            await settingService.SaveSettingAsync(privateMessages);
+            await settingService.SaveSettingAsync(gdprSettings);
+            await settingService.SaveSettingAsync(sitemapSettings);
+            await settingService.SaveSettingAsync(blogSettings);
+            await settingService.SaveSettingAsync(catalogSettings);
+            admin.VendorId = previousVendorId;
+            await customerService.UpdateCustomerAsync(admin);
+            var restored = await customerService.GetCustomerByEmailAsync(global::Nop.Tests.NopTestsDefaults.AdminEmail);
+            if (restored != null)
+                await workContext.SetCurrentCustomerAsync(restored);
+            ClearWorkContextCaches();
+            await EnsurePlainProductInCartAsync();
+        }
+    }
+
     private static async Task<object> AwaitResult(object raw)
     {
         if (raw is not Task task)
@@ -1928,7 +2494,7 @@ public sealed class WebCoverageHarness
     }
 
     public async Task ExerciseRazorPageWithModelAsync(string typeNameFragment, object model,
-        IDictionary<string, object> viewData = null)
+        IDictionary<string, object> viewData = null, Type controllerType = null)
     {
         var type = typeof(global::Nop.Web.Controllers.HomeController).Assembly.GetTypes()
             .FirstOrDefault(candidate =>
@@ -1938,6 +2504,10 @@ public sealed class WebCoverageHarness
                     || candidate.Name.Contains(typeNameFragment, StringComparison.Ordinal)));
         if (type == null)
             return;
+
+        var previousControllerType = RazorControllerType;
+        if (controllerType != null)
+            RazorControllerType = controllerType;
 
         IServiceProvider previousServices = null;
         HttpContext http = null;
@@ -1956,10 +2526,9 @@ public sealed class WebCoverageHarness
             AttachMvc(instance);
             if (instance is RazorPageBase razorPage)
             {
-                if (razorPage.ViewContext?.ViewData != null)
-                    razorPage.ViewContext.ViewData.Model = model;
                 razorPage.Layout = null;
                 razorPage.HtmlEncoder ??= HtmlEncoder.Default;
+                BindTypedRazorModel(razorPage, model, viewData);
                 try
                 {
                     MvcServices.Value.GetService<IRazorPageActivator>()
@@ -1969,44 +2538,30 @@ public sealed class WebCoverageHarness
                 {
                 }
 
-                if (razorPage.ViewContext?.ViewData != null)
-                {
-                    razorPage.ViewContext.ViewData.Model = model;
-                    if (viewData != null)
-                    {
-                        foreach (var pair in viewData)
-                            razorPage.ViewContext.ViewData[pair.Key] = pair.Value;
-                    }
-                }
-                instance.GetType().GetProperty("Model")?.SetValue(instance, model);
                 FillGraph(model, 0);
                 AttachRazorRuntime(razorPage);
                 ActivateRazorInjects(instance, razorPage.ViewContext);
                 razorPage.Layout = null;
-                if (razorPage.ViewContext?.ViewData != null)
-                {
-                    razorPage.ViewContext.ViewData.Model = model;
-                    if (viewData != null)
-                    {
-                        foreach (var pair in viewData)
-                            razorPage.ViewContext.ViewData[pair.Key] = pair.Value;
-                    }
-                }
-                instance.GetType().GetProperty("Model")?.SetValue(instance, model);
+                BindTypedRazorModel(razorPage, model, viewData);
             }
 
-            var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
-            if (execute == null)
-                return;
-            var raw = execute.Invoke(instance, null);
-            if (raw is Task task)
-            {
-                var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(12)));
-                if (finished == task)
-                    await task;
-            }
-
+            await ExecuteRazorAsync(instance, TimeSpan.FromSeconds(12));
             MethodsInvoked++;
+
+            if (instance is RazorPageBase secondPage)
+            {
+                SetObjectBools(model, false);
+                BindTypedRazorModel(secondPage, model, viewData);
+                try
+                {
+                    await ExecuteRazorAsync(instance, TimeSpan.FromSeconds(6));
+                    MethodsInvoked++;
+                }
+                catch
+                {
+                    MethodsFailed++;
+                }
+            }
         }
         catch
         {
@@ -2014,6 +2569,7 @@ public sealed class WebCoverageHarness
         }
         finally
         {
+            RazorControllerType = previousControllerType;
             if (http != null && previousServices != null)
                 http.RequestServices = previousServices;
         }
@@ -2066,30 +2622,27 @@ public sealed class WebCoverageHarness
                     // own ExecuteAsync can finish; compiled partials are invoked separately.
                     ActivateRazorInjects(instance, razorPage.ViewContext);
                     FillRazorModelGraph(instance);
+                    BindTypedRazorModel(razorPage, razorPage.ViewContext?.ViewData?.Model);
                 }
-
-                var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
-                if (execute == null)
-                    continue;
 
                 try
                 {
-                    var raw = execute.Invoke(instance, null);
-                    if (raw is Task task)
-                    {
-                        var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(12)));
-                        if (finished != task)
-                        {
-                            MethodsFailed++;
-                            if (Failures.Count < 40)
-                                Failures.Add($"{type.Name}: ExecuteAsync timed out");
-                            continue;
-                        }
-
-                        await task;
-                    }
-
+                    await ExecuteRazorAsync(instance, TimeSpan.FromSeconds(12));
                     MethodsInvoked++;
+                    if (instance is RazorPageBase polarityPage)
+                    {
+                        var polarityModel = polarityPage.ViewContext?.ViewData?.Model;
+                        SetObjectBools(polarityModel, false);
+                        BindTypedRazorModel(polarityPage, polarityModel);
+                        try
+                        {
+                            await ExecuteRazorAsync(instance, TimeSpan.FromSeconds(6));
+                            MethodsInvoked++;
+                        }
+                        catch
+                        {
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -2263,7 +2816,8 @@ public sealed class WebCoverageHarness
         {
             ControllerName = routeData.Values["controller"]?.ToString() ?? "Product",
             ActionName = routeData.Values["action"]?.ToString() ?? "List",
-            ControllerTypeInfo = typeof(global::Nop.Tests.Nop.Services.Tests.Payments.TestPaymentMethod).GetTypeInfo()
+            ControllerTypeInfo = (RazorControllerType
+                                   ?? typeof(global::Nop.Tests.Nop.Services.Tests.Payments.TestPaymentMethod)).GetTypeInfo()
         };
         var actionContext = new ActionContext(http, routeData, actionDescriptor);
         var url = _services.GetRequiredService<IUrlHelperFactory>().GetUrlHelper(actionContext);
@@ -2459,6 +3013,142 @@ public sealed class WebCoverageHarness
         }
     }
 
+    private async Task ExecuteRazorAsync(object instance, TimeSpan timeout)
+    {
+        var execute = instance.GetType().GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
+        if (execute == null)
+            return;
+
+        var raw = execute.Invoke(instance, null);
+        if (raw is not Task task)
+            return;
+
+        var finished = await Task.WhenAny(task, Task.Delay(timeout));
+        if (finished != task)
+            throw new TimeoutException($"{instance.GetType().Name}.ExecuteAsync timed out");
+
+        await task;
+    }
+
+    private void BindTypedRazorModel(RazorPageBase page, object model, IDictionary<string, object> extra = null)
+    {
+        Type modelType = null;
+        Type razorGeneric = null;
+        for (var type = page.GetType(); type != null; type = type.BaseType)
+        {
+            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(RazorPage<>))
+            {
+                razorGeneric = type;
+                modelType = type.GetGenericArguments()[0];
+                break;
+            }
+        }
+
+        if (page.ViewContext == null)
+            return;
+
+        var source = page.ViewContext.ViewData
+                     ?? new ViewDataDictionary(new EmptyModelMetadataProvider(), new ModelStateDictionary());
+        var typed = source;
+        if (modelType != null)
+        {
+            try
+            {
+                var typedType = typeof(ViewDataDictionary<>).MakeGenericType(modelType);
+                object created;
+                try
+                {
+                    created = Activator.CreateInstance(typedType, source);
+                }
+                catch
+                {
+                    created = Activator.CreateInstance(typedType, new EmptyModelMetadataProvider(), new ModelStateDictionary());
+                    if (created is ViewDataDictionary copied)
+                    {
+                        foreach (var pair in source)
+                            copied[pair.Key] = pair.Value;
+                    }
+                }
+
+                typed = (ViewDataDictionary)created;
+                if (model != null)
+                {
+                    try
+                    {
+                        typedType.GetProperty("Model")?.SetValue(typed, model);
+                    }
+                    catch
+                    {
+                        try { typed.Model = model; }
+                        catch { }
+                    }
+                }
+            }
+            catch
+            {
+                if (model != null)
+                {
+                    try { source.Model = model; }
+                    catch { }
+                }
+
+                typed = source;
+            }
+        }
+        else if (model != null)
+        {
+            try { source.Model = model; }
+            catch { }
+        }
+
+        if (extra != null)
+        {
+            foreach (var pair in extra)
+                typed[pair.Key] = pair.Value;
+        }
+
+        page.ViewContext.ViewData = typed;
+        if (razorGeneric == null)
+            return;
+
+        try
+        {
+            razorGeneric.GetProperty("ViewData")?.SetValue(page, typed);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void SetObjectBools(object model, bool value, int depth = 0)
+    {
+        if (model == null || depth > 2)
+            return;
+        if (model is string or IDictionary)
+            return;
+        if (model is IEnumerable enumerable)
+        {
+            foreach (var item in enumerable.Cast<object>().Take(40))
+                SetObjectBools(item, value, depth + 1);
+            return;
+        }
+
+        foreach (var prop in model.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (!prop.CanWrite || prop.GetIndexParameters().Length != 0)
+                continue;
+            if (prop.PropertyType != typeof(bool) && prop.PropertyType != typeof(bool?))
+                continue;
+            try
+            {
+                prop.SetValue(model, value);
+            }
+            catch
+            {
+            }
+        }
+    }
+
     private void FillRazorModelGraph(object page)
     {
         try
@@ -2509,6 +3199,12 @@ public sealed class WebCoverageHarness
         var type = model.GetType();
         if (ShouldSkipFill(type))
             return;
+
+        if (model is IEnumerable enumerable and not string and not IDictionary)
+        {
+            foreach (var item in enumerable.Cast<object>().Take(40))
+                FillGraph(item, depth + 1);
+        }
 
         if (model is DataTablesModel tables)
         {

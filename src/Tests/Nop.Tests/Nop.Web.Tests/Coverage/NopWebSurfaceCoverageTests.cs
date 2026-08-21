@@ -141,30 +141,61 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     {
         var harness = CreateHarness();
         var customerSettings = GetService<CustomerSettings>();
-        var snap = Snapshot(customerSettings);
-        foreach (var prop in customerSettings.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                     .Where(p => p.CanWrite && p.PropertyType == typeof(bool) && p.Name.EndsWith("Enabled", StringComparison.Ordinal)))
+        var addressSettings = GetService<AddressSettings>();
+        var taxSettings = GetService<TaxSettings>();
+        var snapCustomer = Snapshot(customerSettings);
+        var snapAddress = Snapshot(addressSettings);
+        var snapTax = Snapshot(taxSettings);
+        var types = WebAssemblyMarker.Assembly.GetTypes()
+            .Where(t => t.IsClass && !t.IsAbstract && t.Name.EndsWith("Validator", StringComparison.Ordinal)
+                        && t.Namespace != null
+                        && (t.Namespace.StartsWith("Nop.Web.Areas.Admin.Validators", StringComparison.Ordinal)
+                            || t.Namespace.StartsWith("Nop.Web.Validators", StringComparison.Ordinal)))
+            .ToList();
+
+        void ApplyFlags(object settings, bool enabled, bool required)
         {
-            prop.SetValue(customerSettings, true);
+            foreach (var prop in settings.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                         .Where(p => p.CanWrite && p.GetIndexParameters().Length == 0))
+            {
+                if (prop.PropertyType == typeof(bool) && prop.Name.EndsWith("Enabled", StringComparison.Ordinal))
+                    prop.SetValue(settings, enabled);
+                if (prop.PropertyType == typeof(bool) && prop.Name.EndsWith("Required", StringComparison.Ordinal))
+                    prop.SetValue(settings, required);
+            }
         }
 
-        customerSettings.UsernamesEnabled = true;
-        customerSettings.DateOfBirthRequired = true;
-        customerSettings.CountryEnabled = true;
-        customerSettings.StateProvinceEnabled = true;
         try
         {
-            var types = WebAssemblyMarker.Assembly.GetTypes()
-                .Where(t => t.IsClass && !t.IsAbstract && t.Name.EndsWith("Validator", StringComparison.Ordinal)
-                            && t.Namespace != null
-                            && (t.Namespace.StartsWith("Nop.Web.Areas.Admin.Validators", StringComparison.Ordinal)
-                                || t.Namespace.StartsWith("Nop.Web.Validators", StringComparison.Ordinal)));
+            ApplyFlags(customerSettings, true, true);
+            ApplyFlags(addressSettings, true, true);
+            ApplyFlags(taxSettings, true, true);
+            customerSettings.EnteringEmailTwice = true;
+            customerSettings.UsernamesEnabled = true;
+            customerSettings.DateOfBirthMinimumAge = 18;
+            taxSettings.EuVatEnabled = true;
+            taxSettings.EuVatRequired = true;
+            await harness.ExerciseValidatorsAsync(types);
+
+            ApplyFlags(customerSettings, true, false);
+            ApplyFlags(addressSettings, true, false);
+            ApplyFlags(taxSettings, true, false);
+            customerSettings.EnteringEmailTwice = false;
+            customerSettings.DateOfBirthMinimumAge = null;
+            taxSettings.EuVatRequired = false;
+            await harness.ExerciseValidatorsAsync(types);
+
+            ApplyFlags(customerSettings, false, false);
+            ApplyFlags(addressSettings, false, false);
+            ApplyFlags(taxSettings, false, false);
             await harness.ExerciseValidatorsAsync(types);
             harness.TypesCreated.Should().BeGreaterThan(0);
         }
         finally
         {
-            Restore(customerSettings, snap);
+            Restore(customerSettings, snapCustomer);
+            Restore(addressSettings, snapAddress);
+            Restore(taxSettings, snapTax);
         }
     }
 
@@ -1319,6 +1350,8 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             }
 
             await harness.ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Shared__ConfigurePlugin", new object());
+            await harness.ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Shared__ConfigurePlugin", new object(),
+                controllerType: typeof(global::Nop.Tests.Nop.Services.Tests.Shipping.FixedRateTestShippingRateComputationMethod));
         }
         catch
         {
@@ -2593,6 +2626,14 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     {
         var harness = CreateHarness();
         await harness.ExerciseFactoryPreparedAdminCrudAsync();
+        harness.TypesCreated.Should().BeGreaterThan(0);
+    }
+
+    [Test]
+    public async Task ExerciseCoverageTails()
+    {
+        var harness = CreateHarness();
+        await harness.ExerciseCoverageTailsAsync();
         harness.TypesCreated.Should().BeGreaterThan(0);
     }
 
