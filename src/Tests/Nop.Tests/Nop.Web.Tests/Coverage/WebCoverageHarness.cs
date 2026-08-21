@@ -4535,6 +4535,9 @@ public sealed class WebCoverageHarness
             var target = attributes.FirstOrDefault(item => item.Id != dropdown?.Id) ?? dropdown;
             if (target != null && dropdown != null)
             {
+                var originalConditionXml = target.ConditionAttributeXml;
+                try
+                {
                 var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICheckoutAttributeModelFactory>();
                 var model = await factory.PrepareCheckoutAttributeModelAsync(null, target);
                 var values = await checkoutAttributes.GetAttributeValuesAsync(dropdown.Id);
@@ -4585,20 +4588,37 @@ public sealed class WebCoverageHarness
                     AttributeControlType = AttributeControlType.ColorSquares
                 };
                 await checkoutAttributes.InsertAttributeAsync(color);
-                controller.ModelState.Clear();
-                await controller.ValueCreatePopup(new global::Nop.Web.Areas.Admin.Models.Orders.CheckoutAttributeValueModel
+                try
                 {
-                    AttributeId = color.Id,
-                    Name = "Red",
-                    ColorSquaresRgb = "not-a-color"
-                });
-                controller.ModelState.Clear();
-                await controller.ValueCreatePopup(new global::Nop.Web.Areas.Admin.Models.Orders.CheckoutAttributeValueModel
+                    controller.ModelState.Clear();
+                    await controller.ValueCreatePopup(new global::Nop.Web.Areas.Admin.Models.Orders.CheckoutAttributeValueModel
+                    {
+                        AttributeId = color.Id,
+                        Name = "Red",
+                        ColorSquaresRgb = "not-a-color"
+                    });
+                    controller.ModelState.Clear();
+                    await controller.ValueCreatePopup(new global::Nop.Web.Areas.Admin.Models.Orders.CheckoutAttributeValueModel
+                    {
+                        AttributeId = color.Id,
+                        Name = "Red",
+                        ColorSquaresRgb = "#ff0000"
+                    });
+                }
+                finally
                 {
-                    AttributeId = color.Id,
-                    Name = "Red",
-                    ColorSquaresRgb = "#ff0000"
-                });
+                    try { await checkoutAttributes.DeleteAttributeAsync(color); } catch { }
+                }
+                }
+                finally
+                {
+                    var restored = await checkoutAttributes.GetAttributeByIdAsync(target.Id);
+                    if (restored != null)
+                    {
+                        restored.ConditionAttributeXml = originalConditionXml;
+                        await checkoutAttributes.UpdateAttributeAsync(restored);
+                    }
+                }
             }
         });
 
@@ -4929,28 +4949,36 @@ public sealed class WebCoverageHarness
             var previousAnonymous = orderSettings.AnonymousCheckoutAllowed;
             var previousOpc = orderSettings.OnePageCheckoutEnabled;
             var checkout = CreateController<global::Nop.Web.Controllers.CheckoutController>();
-            orderSettings.CheckoutDisabled = true;
-            await settingService.SaveSettingAsync(orderSettings);
-            await checkout.Index();
-            orderSettings.CheckoutDisabled = false;
-            orderSettings.AnonymousCheckoutAllowed = false;
-            orderSettings.OnePageCheckoutEnabled = false;
-            await settingService.SaveSettingAsync(orderSettings);
-            var guest = await customerService.InsertGuestCustomerAsync();
-            await workContext.SetCurrentCustomerAsync(guest);
-            ClearWorkContextCaches();
-            await checkout.Index();
-            await workContext.SetCurrentCustomerAsync(admin);
-            ClearWorkContextCaches();
-            await EnsurePlainProductInCartAsync();
-            orderSettings.AnonymousCheckoutAllowed = true;
-            await settingService.SaveSettingAsync(orderSettings);
-            await checkout.Index();
-            orderSettings.CheckoutDisabled = previousDisabled;
-            orderSettings.AnonymousCheckoutAllowed = previousAnonymous;
-            orderSettings.OnePageCheckoutEnabled = previousOpc;
-            await settingService.SaveSettingAsync(orderSettings);
-            await EnsurePlainProductInCartAsync();
+            try
+            {
+                orderSettings.CheckoutDisabled = true;
+                await settingService.SaveSettingAsync(orderSettings);
+                await checkout.Index();
+                orderSettings.CheckoutDisabled = false;
+                orderSettings.AnonymousCheckoutAllowed = false;
+                orderSettings.OnePageCheckoutEnabled = false;
+                await settingService.SaveSettingAsync(orderSettings);
+                var guest = await customerService.InsertGuestCustomerAsync();
+                await workContext.SetCurrentCustomerAsync(guest);
+                ClearWorkContextCaches();
+                await checkout.Index();
+                await workContext.SetCurrentCustomerAsync(admin);
+                ClearWorkContextCaches();
+                await EnsurePlainProductInCartAsync();
+                orderSettings.AnonymousCheckoutAllowed = true;
+                await settingService.SaveSettingAsync(orderSettings);
+                await checkout.Index();
+            }
+            finally
+            {
+                orderSettings.CheckoutDisabled = previousDisabled;
+                orderSettings.AnonymousCheckoutAllowed = previousAnonymous;
+                orderSettings.OnePageCheckoutEnabled = previousOpc;
+                await settingService.SaveSettingAsync(orderSettings);
+                await workContext.SetCurrentCustomerAsync(admin);
+                ClearWorkContextCaches();
+                await EnsurePlainProductInCartAsync();
+            }
         });
     }
 
