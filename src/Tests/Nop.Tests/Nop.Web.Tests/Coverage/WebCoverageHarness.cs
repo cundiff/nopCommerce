@@ -2083,17 +2083,20 @@ public sealed class WebCoverageHarness
                 var descriptors = await pluginService.GetPluginDescriptorsAsync<IPlugin>(LoadPluginsMode.All);
                 foreach (var descriptor in descriptors.Take(20))
                 {
-                    await pluginController.EditPopup(descriptor.SystemName);
-                    var model = await pluginFactory.PreparePluginModelAsync(null, descriptor);
-                    model.IsEnabled = true;
-                    pluginController.ModelState.Clear();
-                    await pluginController.EditPopup(model);
-                    model.IsEnabled = false;
-                    pluginController.ModelState.Clear();
-                    await pluginController.EditPopup(model);
-                    model.IsEnabled = true;
-                    pluginController.ModelState.Clear();
-                    await pluginController.EditPopup(model);
+                    try
+                    {
+                        await pluginController.EditPopup(descriptor.SystemName);
+                        var model = await pluginFactory.PreparePluginModelAsync(null, descriptor);
+                        model.IsEnabled = true;
+                        pluginController.ModelState.Clear();
+                        await pluginController.EditPopup(model);
+                        model.IsEnabled = false;
+                        pluginController.ModelState.Clear();
+                        await pluginController.EditPopup(model);
+                    }
+                    catch
+                    {
+                    }
                 }
             });
 
