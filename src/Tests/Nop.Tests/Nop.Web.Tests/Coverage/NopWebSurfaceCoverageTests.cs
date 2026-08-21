@@ -1231,6 +1231,32 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             var shipping = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel();
             await checkoutFactory.PrepareShippingAddressModelAsync(shipping, cart, prePopulateNewAddressWithCustomerFields: true);
             await harness.ExerciseRazorPageWithModelAsync("Views_Checkout_ShippingAddress", shipping);
+            shipping.PickupPointsModel ??= new global::Nop.Web.Models.Checkout.CheckoutPickupPointsModel();
+            shipping.PickupPointsModel.PickupInStoreOnly = false;
+            shipping.PickupPointsModel.AllowPickupInStore = true;
+            if (shipping.PickupPointsModel.PickupPoints.Count == 0)
+            {
+                shipping.PickupPointsModel.PickupPoints.Add(new global::Nop.Web.Models.Checkout.CheckoutPickupPointModel
+                {
+                    Id = "1",
+                    Name = "Coverage pickup",
+                    Address = "1 Coverage Way",
+                    City = "New York",
+                    CountryName = "United States",
+                    PickupFee = "$0.00"
+                });
+            }
+
+            await harness.ExerciseRazorPageWithModelAsync("Views_Checkout__PickupPoints", shipping.PickupPointsModel);
+
+            var returnOrder = (await GetService<IOrderService>().SearchOrdersAsync(pageIndex: 0, pageSize: 1)).FirstOrDefault();
+            if (returnOrder != null)
+            {
+                var returnFactory = GetService<global::Nop.Web.Factories.IReturnRequestModelFactory>();
+                var returnModel = await returnFactory.PrepareSubmitReturnRequestModelAsync(
+                    new global::Nop.Web.Models.Order.SubmitReturnRequestModel(), returnOrder);
+                await harness.ExerciseRazorPageWithModelAsync("Views_ReturnRequest_ReturnRequest", returnModel);
+            }
 
             var order = (await GetService<IOrderService>().SearchOrdersAsync(pageIndex: 0, pageSize: 1)).FirstOrDefault();
             if (order != null)
@@ -1241,10 +1267,22 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                 var adminOrderFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IOrderModelFactory>();
                 var adminOrder = await adminOrderFactory.PrepareOrderModelAsync(null, order);
                 await harness.ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Order__OrderDetails_Info", adminOrder);
-                var addProductEntity = (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First();
+                Product addProductEntity = null;
+                var addAttributeService = GetService<IProductAttributeService>();
+                foreach (var candidate in await GetService<IProductService>().SearchProductsAsync(pageSize: 40))
+                {
+                    if ((await addAttributeService.GetProductAttributeMappingsByProductIdAsync(candidate.Id)).Count == 0)
+                        continue;
+                    addProductEntity = candidate;
+                    break;
+                }
+
+                addProductEntity ??= (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First();
                 var addProduct = await adminOrderFactory.PrepareAddProductToOrderModelAsync(
                     new global::Nop.Web.Areas.Admin.Models.Orders.AddProductToOrderModel(), order, addProductEntity);
-                await harness.ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Order__ProductAddAttributes", addProduct);
+                await harness.ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Order__ProductAddAttributes",
+                    addProduct.ProductAttributes, new Dictionary<string, object> { ["productId"] = addProductEntity.Id });
+                await harness.ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Order__OrderDetails_Info", adminOrder);
             }
 
             await harness.ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Shared__ConfigurePlugin", new object());

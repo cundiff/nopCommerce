@@ -1156,7 +1156,8 @@ public sealed class WebCoverageHarness
         MethodsInvoked += 8;
     }
 
-    public async Task ExerciseRazorPageWithModelAsync(string typeNameFragment, object model)
+    public async Task ExerciseRazorPageWithModelAsync(string typeNameFragment, object model,
+        IDictionary<string, object> viewData = null)
     {
         var type = typeof(global::Nop.Web.Controllers.HomeController).Assembly.GetTypes()
             .FirstOrDefault(candidate =>
@@ -1198,8 +1199,16 @@ public sealed class WebCoverageHarness
                 }
 
                 if (razorPage.ViewContext?.ViewData != null)
+                {
                     razorPage.ViewContext.ViewData.Model = model;
+                    if (viewData != null)
+                    {
+                        foreach (var pair in viewData)
+                            razorPage.ViewContext.ViewData[pair.Key] = pair.Value;
+                    }
+                }
                 instance.GetType().GetProperty("Model")?.SetValue(instance, model);
+                FillGraph(model, 0);
                 AttachRazorRuntime(razorPage);
                 ActivateRazorInjects(instance, razorPage.ViewContext);
                 razorPage.Layout = null;
