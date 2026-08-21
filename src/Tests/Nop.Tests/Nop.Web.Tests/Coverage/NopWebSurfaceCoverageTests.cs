@@ -2589,6 +2589,14 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     }
 
     [Test]
+    public async Task ExerciseFactoryPreparedAdminCrud()
+    {
+        var harness = CreateHarness();
+        await harness.ExerciseFactoryPreparedAdminCrudAsync();
+        harness.TypesCreated.Should().BeGreaterThan(0);
+    }
+
+    [Test]
     public async Task ExerciseDeletesAndAccountTokens()
     {
         var harness = CreateHarness();

@@ -1722,7 +1722,209 @@ public sealed class WebCoverageHarness
             }
         });
 
+        await Try(async () =>
+        {
+            var download = CreateController<global::Nop.Web.Controllers.DownloadController>();
+            foreach (var special in created)
+                await download.Sample(special.Id);
+            await download.Sample(host.Id);
+            foreach (var order in await _services.GetRequiredService<IOrderService>().SearchOrdersAsync(pageIndex: 0, pageSize: 5))
+            {
+                var items = await _services.GetRequiredService<IOrderService>().GetOrderItemsAsync(order.Id);
+                foreach (var item in items.Take(2))
+                {
+                    await download.GetDownload(item.OrderItemGuid, true);
+                    await download.GetDownload(item.OrderItemGuid, false);
+                    await download.GetLicense(item.OrderItemGuid);
+                }
+            }
+        });
+
+        await Try(async () =>
+        {
+            var orders = CreateController<global::Nop.Web.Controllers.OrderController>();
+            foreach (var order in await _services.GetRequiredService<IOrderService>().SearchOrdersAsync(pageIndex: 0, pageSize: 8))
+            {
+                await orders.Details(order.Id);
+                await orders.PrintOrderDetails(order.Id);
+                await orders.GetPdfInvoice(order.Id);
+                await orders.ReOrder(order.Id);
+                await orders.RePostPayment(order.Id);
+            }
+
+            await orders.CustomerOrders(1, OrderHistoryPeriods.All);
+            await orders.CustomerOrders(1, OrderHistoryPeriods.Day);
+            await orders.CustomerRecurringPayments();
+            await orders.CustomerRewardPoints(1);
+        });
+
         await EnsurePlainProductInCartAsync();
+    }
+
+    public async Task ExerciseFactoryPreparedAdminCrudAsync()
+    {
+        var assembly = typeof(global::Nop.Web.Controllers.HomeController).Assembly;
+        var factoryInterfaces = assembly.GetTypes()
+            .Where(t => t.IsInterface
+                        && t.Namespace == "Nop.Web.Areas.Admin.Factories"
+                        && t.Name.EndsWith("ModelFactory", StringComparison.Ordinal))
+            .ToList();
+
+        foreach (var iface in factoryInterfaces)
+        {
+            object factory;
+            try
+            {
+                factory = _services.GetService(iface);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (factory == null)
+                continue;
+            if (iface.Name is "IProductModelFactory" or "IOrderModelFactory" or "ICustomerModelFactory"
+                or "ISettingModelFactory" or "IShoppingCartModelFactory" or "ICheckoutModelFactory")
+                continue;
+
+            foreach (var prepare in iface.GetMethods().Where(method =>
+                         method.Name.StartsWith("Prepare", StringComparison.Ordinal)
+                         && method.Name.EndsWith("ModelAsync", StringComparison.Ordinal)
+                         && !method.Name.Contains("List", StringComparison.Ordinal)
+                         && !method.Name.Contains("Search", StringComparison.Ordinal)))
+            {
+                var parameters = prepare.GetParameters();
+                var entityParam = parameters.FirstOrDefault(p => typeof(BaseEntity).IsAssignableFrom(p.ParameterType));
+                var modelParam = parameters.FirstOrDefault(p => p.ParameterType.Name.EndsWith("Model", StringComparison.Ordinal));
+                if (entityParam == null || modelParam == null)
+                    continue;
+
+                var entities = GetEntities(entityParam.ParameterType, 2);
+                if (entities.Count == 0)
+                    entities = [null];
+
+                foreach (var entity in entities)
+                {
+                    object model;
+                    try
+                    {
+                        var args = parameters.Select(p =>
+                        {
+                            if (p == entityParam)
+                                return entity;
+                            if (p == modelParam)
+                                return null;
+                            if (p.ParameterType == typeof(bool) || p.ParameterType == typeof(bool?))
+                                return false;
+                            return CreateArg(p.ParameterType, p.Name, iface);
+                        }).ToArray();
+                        model = await AwaitResult(prepare.Invoke(factory, args));
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (model == null)
+                        continue;
+
+                    await InvokeMatchingControllerSaveAsync(model);
+                }
+            }
+        }
+    }
+
+    private async Task InvokeMatchingControllerSaveAsync(object model)
+    {
+        var modelType = model.GetType();
+        var modelName = modelType.Name;
+        if (!modelName.EndsWith("Model", StringComparison.Ordinal))
+            return;
+
+        var entityName = modelName[..^5];
+        var assembly = typeof(global::Nop.Web.Controllers.HomeController).Assembly;
+        var controllerType = assembly.GetType($"Nop.Web.Areas.Admin.Controllers.{entityName}Controller")
+                             ?? assembly.GetType($"Nop.Web.Controllers.{entityName}Controller");
+        if (controllerType == null || controllerType.Name is "InstallController" or "ElFinderController"
+            or "ProductController" or "OrderController" or "CustomerController" or "SettingController"
+            or "CheckoutController" or "ShoppingCartController")
+            return;
+
+        object controller;
+        try
+        {
+            controller = ActivatorUtilities.CreateInstance(_services, controllerType);
+            if (controller is Controller)
+                AttachMvc(controller);
+            TypesCreated++;
+        }
+        catch
+        {
+            return;
+        }
+
+        var methods = controllerType.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(method => !method.IsSpecialName
+                             && method.GetParameters().Any(p => p.ParameterType == modelType || p.ParameterType.IsInstanceOfType(model))
+                             && (method.Name.Contains("Edit", StringComparison.Ordinal)
+                                 || method.Name.Contains("Create", StringComparison.Ordinal)
+                                 || method.Name.Contains("Save", StringComparison.Ordinal)
+                                 || method.Name.Contains("Update", StringComparison.Ordinal))
+                             && !method.Name.Contains("Delete", StringComparison.OrdinalIgnoreCase)
+                             && !method.Name.Contains("Import", StringComparison.OrdinalIgnoreCase))
+            .Take(6)
+            .ToList();
+
+        foreach (var method in methods)
+        {
+            try
+            {
+                if (controller is Controller mvc)
+                    mvc.ModelState.Clear();
+
+                var nameProp = modelType.GetProperty("Name");
+                if (nameProp?.CanWrite == true && nameProp.PropertyType == typeof(string)
+                    && method.Name.Contains("Create", StringComparison.Ordinal))
+                    nameProp.SetValue(model, "Coverage " + Guid.NewGuid().ToString("N")[..8]);
+
+                var emailProp = modelType.GetProperty("Email");
+                if (emailProp?.CanWrite == true && emailProp.PropertyType == typeof(string)
+                    && method.Name.Contains("Create", StringComparison.Ordinal))
+                    emailProp.SetValue(model, $"cov-{Guid.NewGuid():N}@example.com");
+
+                var args = method.GetParameters().Select(p =>
+                {
+                    if (p.ParameterType == modelType || p.ParameterType.IsInstanceOfType(model))
+                        return model;
+                    if (p.Name == "continueEditing")
+                        return (object)true;
+                    if (typeof(IFormCollection).IsAssignableFrom(p.ParameterType))
+                        return CreateForm();
+                    return CreateArg(p.ParameterType, p.Name, controllerType);
+                }).ToArray();
+
+                var (ok, _) = await TryInvokeAsync(controller, method, args, TimeSpan.FromSeconds(12));
+                if (ok)
+                    MethodsInvoked++;
+                else
+                    MethodsFailed++;
+            }
+            catch
+            {
+                MethodsFailed++;
+            }
+        }
+    }
+
+    private static async Task<object> AwaitResult(object raw)
+    {
+        if (raw is not Task task)
+            return raw;
+
+        await task;
+        var taskType = task.GetType();
+        return taskType.IsGenericType ? taskType.GetProperty("Result")?.GetValue(task) : null;
     }
 
     public async Task ExerciseRazorPageWithModelAsync(string typeNameFragment, object model,
@@ -1781,6 +1983,16 @@ public sealed class WebCoverageHarness
                 AttachRazorRuntime(razorPage);
                 ActivateRazorInjects(instance, razorPage.ViewContext);
                 razorPage.Layout = null;
+                if (razorPage.ViewContext?.ViewData != null)
+                {
+                    razorPage.ViewContext.ViewData.Model = model;
+                    if (viewData != null)
+                    {
+                        foreach (var pair in viewData)
+                            razorPage.ViewContext.ViewData[pair.Key] = pair.Value;
+                    }
+                }
+                instance.GetType().GetProperty("Model")?.SetValue(instance, model);
             }
 
             var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
