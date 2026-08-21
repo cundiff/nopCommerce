@@ -1683,6 +1683,34 @@ public sealed class WebCoverageHarness
         }
     }
 
+    private static void FillAttributeValues(object attribute)
+    {
+        var valuesProp = attribute.GetType().GetProperty("Values");
+        if (valuesProp?.GetValue(attribute) is not IList values)
+            return;
+
+        var itemType = valuesProp.PropertyType.IsGenericType
+            ? valuesProp.PropertyType.GetGenericArguments()[0]
+            : values.GetType().GetGenericArguments().FirstOrDefault();
+        if (itemType == null)
+            return;
+
+        while (values.Count < 2)
+        {
+            var value = Activator.CreateInstance(itemType);
+            if (value == null)
+                break;
+            itemType.GetProperty("Name")?.SetValue(value, $"value{values.Count}");
+            itemType.GetProperty("PriceAdjustment")?.SetValue(value, "+$1.00");
+            itemType.GetProperty("PriceAdjustmentValue")?.SetValue(value, 1m);
+            itemType.GetProperty("CustomerEntersQty")?.SetValue(value, true);
+            itemType.GetProperty("Quantity")?.SetValue(value, 2);
+            itemType.GetProperty("IsPreSelected")?.SetValue(value, values.Count == 0);
+            itemType.GetProperty("ColorSquaresRgb")?.SetValue(value, "#ff0000");
+            values.Add(value);
+        }
+    }
+
     private void FillGraph(object model, int depth)
     {
         if (model == null || depth > 5)
@@ -1793,7 +1821,28 @@ public sealed class WebCoverageHarness
                         continue;
                     }
 
-                    if (list.Count == 0)
+                    var controlProp = itemType.GetProperty("AttributeControlType");
+                    if (controlProp?.PropertyType == typeof(AttributeControlType))
+                    {
+                        foreach (AttributeControlType control in Enum.GetValues<AttributeControlType>())
+                        {
+                            if (list.Cast<object>().Any(existingItem =>
+                                    Equals(controlProp.GetValue(existingItem), control)))
+                                continue;
+
+                            var item = CreateDefault(itemType);
+                            if (item == null)
+                                continue;
+                            controlProp.SetValue(item, control);
+                            itemType.GetProperty("Name")?.SetValue(item, control.ToString());
+                            itemType.GetProperty("TextPrompt")?.SetValue(item, control.ToString());
+                            itemType.GetProperty("Description")?.SetValue(item, "coverage");
+                            FillAttributeValues(item);
+                            list.Add(item);
+                            FillGraph(item, depth + 1);
+                        }
+                    }
+                    else if (list.Count == 0)
                     {
                         object item;
                         if (itemType == typeof(string))
