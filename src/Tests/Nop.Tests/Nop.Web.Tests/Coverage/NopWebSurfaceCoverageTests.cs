@@ -140,13 +140,32 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     public async Task ExerciseValidators()
     {
         var harness = CreateHarness();
-        var types = WebAssemblyMarker.Assembly.GetTypes()
-            .Where(t => t.IsClass && !t.IsAbstract && t.Name.EndsWith("Validator", StringComparison.Ordinal)
-                        && t.Namespace != null
-                        && (t.Namespace.StartsWith("Nop.Web.Areas.Admin.Validators", StringComparison.Ordinal)
-                            || t.Namespace.StartsWith("Nop.Web.Validators", StringComparison.Ordinal)));
-        await harness.ExerciseValidatorsAsync(types);
-        harness.TypesCreated.Should().BeGreaterThan(0);
+        var customerSettings = GetService<CustomerSettings>();
+        var snap = Snapshot(customerSettings);
+        foreach (var prop in customerSettings.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                     .Where(p => p.CanWrite && p.PropertyType == typeof(bool) && p.Name.EndsWith("Enabled", StringComparison.Ordinal)))
+        {
+            prop.SetValue(customerSettings, true);
+        }
+
+        customerSettings.UsernamesEnabled = true;
+        customerSettings.DateOfBirthRequired = true;
+        customerSettings.CountryEnabled = true;
+        customerSettings.StateProvinceEnabled = true;
+        try
+        {
+            var types = WebAssemblyMarker.Assembly.GetTypes()
+                .Where(t => t.IsClass && !t.IsAbstract && t.Name.EndsWith("Validator", StringComparison.Ordinal)
+                            && t.Namespace != null
+                            && (t.Namespace.StartsWith("Nop.Web.Areas.Admin.Validators", StringComparison.Ordinal)
+                                || t.Namespace.StartsWith("Nop.Web.Validators", StringComparison.Ordinal)));
+            await harness.ExerciseValidatorsAsync(types);
+            harness.TypesCreated.Should().BeGreaterThan(0);
+        }
+        finally
+        {
+            Restore(customerSettings, snap);
+        }
     }
 
     [Test]
@@ -1180,13 +1199,24 @@ public class NopWebSurfaceCoverageTests : ServiceTest
 
         try
         {
-            var product = (await GetService<IProductService>().SearchProductsAsync(pageSize: 20))
-                .FirstOrDefault(p => p.ProductType == ProductType.SimpleProduct)
-                ?? (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First();
+            var attributeService = GetService<IProductAttributeService>();
             var productFactory = GetService<global::Nop.Web.Factories.IProductModelFactory>();
-            var details = await productFactory.PrepareProductDetailsModelAsync(product);
-            await harness.ExerciseRazorPageWithModelAsync("Views_Product__ProductAttributes", details);
-            await harness.ExerciseRazorPageWithModelAsync("Views_Product_ProductTemplate.Simple", details);
+            foreach (var candidate in await GetService<IProductService>().SearchProductsAsync(pageSize: 50))
+            {
+                if ((await attributeService.GetProductAttributeMappingsByProductIdAsync(candidate.Id)).Count == 0)
+                    continue;
+                var details = await productFactory.PrepareProductDetailsModelAsync(candidate);
+                await harness.ExerciseRazorPageWithModelAsync("Views_Product__ProductAttributes", details);
+                await harness.ExerciseRazorPageWithModelAsync("Views_Product_ProductTemplate.Simple", details);
+                if (details.ProductAttributes.Count > 0)
+                    break;
+            }
+
+            var grouped = (await GetService<IProductService>().SearchProductsAsync(pageSize: 50))
+                .FirstOrDefault(p => p.ProductType == ProductType.GroupedProduct);
+            if (grouped != null)
+                await harness.ExerciseRazorPageWithModelAsync("Views_Product_ProductTemplate.Grouped",
+                    await productFactory.PrepareProductDetailsModelAsync(grouped));
 
             var customer = await GetService<IWorkContext>().GetCurrentCustomerAsync();
             var store = await GetService<IStoreContext>().GetCurrentStoreAsync();
@@ -1211,8 +1241,9 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                 var adminOrderFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IOrderModelFactory>();
                 var adminOrder = await adminOrderFactory.PrepareOrderModelAsync(null, order);
                 await harness.ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Order__OrderDetails_Info", adminOrder);
+                var addProductEntity = (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First();
                 var addProduct = await adminOrderFactory.PrepareAddProductToOrderModelAsync(
-                    new global::Nop.Web.Areas.Admin.Models.Orders.AddProductToOrderModel(), order, product);
+                    new global::Nop.Web.Areas.Admin.Models.Orders.AddProductToOrderModel(), order, addProductEntity);
                 await harness.ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Order__ProductAddAttributes", addProduct);
             }
 
@@ -2465,6 +2496,158 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             if (values.TryGetValue(prop.Name, out var value))
                 prop.SetValue(settings, value);
         }
+    }
+
+    [Test]
+    public async Task ExerciseDeletesAndAccountTokens()
+    {
+        var harness = CreateHarness();
+        await harness.SeedShoppingCartAsync();
+        await harness.SeedWishlistAsync();
+
+        async Task Try(Func<Task> action)
+        {
+            try { await action(); } catch { }
+        }
+
+        var admin = await GetService<ICustomerService>().GetCustomerByEmailAsync(NopTestsDefaults.AdminEmail);
+        var generic = GetService<IGenericAttributeService>();
+        var publicCustomer = harness.CreateController<global::Nop.Web.Controllers.CustomerController>();
+        var token = Guid.NewGuid().ToString("N");
+
+        await Try(async () =>
+        {
+            await generic.SaveAttributeAsync(admin, NopCustomerDefaults.AccountActivationTokenAttribute, token);
+            await publicCustomer.AccountActivation(token, admin.Email, admin.CustomerGuid);
+            await publicCustomer.AccountActivation("wrong", admin.Email, admin.CustomerGuid);
+        });
+        await Try(async () =>
+        {
+            await generic.SaveAttributeAsync(admin, NopCustomerDefaults.PasswordRecoveryTokenAttribute, token);
+            await generic.SaveAttributeAsync(admin, NopCustomerDefaults.PasswordRecoveryTokenDateGeneratedAttribute, DateTime.UtcNow);
+            await publicCustomer.PasswordRecoveryConfirm(token, admin.Email, admin.CustomerGuid);
+            await publicCustomer.PasswordRecoveryConfirm("wrong", admin.Email, admin.CustomerGuid);
+            publicCustomer.ModelState.Clear();
+            await publicCustomer.PasswordRecoveryConfirmPOST(token, admin.Email, admin.CustomerGuid,
+                new PasswordRecoveryConfirmModel { NewPassword = "1q2w3e4r5t", ConfirmNewPassword = "1q2w3e4r5t" });
+        });
+        await Try(async () =>
+        {
+            admin.EmailToRevalidate = $"reval-{Guid.NewGuid():N}@example.com";
+            await GetService<ICustomerService>().UpdateCustomerAsync(admin);
+            await generic.SaveAttributeAsync(admin, NopCustomerDefaults.EmailRevalidationTokenAttribute, token);
+            var previousType = GetService<CustomerSettings>().UserRegistrationType;
+            GetService<CustomerSettings>().UserRegistrationType = UserRegistrationType.EmailValidation;
+            try
+            {
+                await publicCustomer.EmailRevalidation(token, admin.Email, admin.CustomerGuid);
+            }
+            finally
+            {
+                GetService<CustomerSettings>().UserRegistrationType = previousType;
+                admin.EmailToRevalidate = null;
+                await GetService<ICustomerService>().UpdateCustomerAsync(admin);
+            }
+        });
+        await Try(async () =>
+        {
+            publicCustomer.ModelState.Clear();
+            await publicCustomer.Login(new LoginModel
+            {
+                Email = NopTestsDefaults.AdminEmail,
+                Username = NopTestsDefaults.AdminEmail,
+                Password = NopTestsDefaults.AdminPassword,
+                RememberMe = true
+            }, "/login", true);
+            await publicCustomer.Login(false);
+            await publicCustomer.ChangePassword();
+            publicCustomer.ModelState.Clear();
+            await publicCustomer.ChangePassword(new ChangePasswordModel
+            {
+                OldPassword = NopTestsDefaults.AdminPassword,
+                NewPassword = NopTestsDefaults.AdminPassword,
+                ConfirmNewPassword = NopTestsDefaults.AdminPassword
+            }, "/");
+        });
+        await Try(async () =>
+        {
+            var extra = new Address
+            {
+                FirstName = "Del",
+                LastName = "Addr",
+                Email = $"del-addr-{Guid.NewGuid():N}@example.com",
+                Address1 = $"Del {Guid.NewGuid():N}",
+                City = "New York",
+                CountryId = 1,
+                CreatedOnUtc = DateTime.UtcNow
+            };
+            await GetService<IAddressService>().InsertAddressAsync(extra);
+            await GetService<ICustomerService>().InsertCustomerAddressAsync(admin, extra);
+            await publicCustomer.AddressDelete(extra.Id);
+        });
+
+        var productController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
+        var attributeService = GetService<IProductAttributeService>();
+        var product = (await GetService<IProductService>().SearchProductsAsync(pageSize: 20))
+            .FirstOrDefault(p => p.Name == "Coverage Plain Product")
+            ?? (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First();
+        await Try(async () =>
+        {
+            var pictures = await GetService<IProductService>().GetProductPicturesByProductIdAsync(product.Id);
+            if (pictures.Count > 0)
+                await productController.ProductPictureDelete(pictures.Last().Id);
+        });
+        await Try(async () =>
+        {
+            var videos = await GetService<IProductService>().GetProductVideosByProductIdAsync(product.Id);
+            if (videos.Count > 0)
+                await productController.ProductVideoDelete(videos.Last().Id);
+        });
+        await Try(async () =>
+        {
+            var mappings = await attributeService.GetProductAttributeMappingsByProductIdAsync(product.Id);
+            var mapping = mappings.LastOrDefault();
+            if (mapping == null)
+                return;
+            var values = await attributeService.GetProductAttributeValuesAsync(mapping.Id);
+            if (values.Count > 0)
+                await productController.ProductAttributeValueDelete(values.Last().Id);
+            await productController.ProductAttributeMappingDelete(mapping.Id);
+        });
+        await Try(async () =>
+        {
+            var specs = await GetService<ISpecificationAttributeService>().GetProductSpecificationAttributesAsync(product.Id);
+            if (specs.Count > 0)
+                await productController.ProductSpecAttrDelete(new global::Nop.Web.Areas.Admin.Models.Catalog.AddSpecificationAttributeModel
+                {
+                    Id = specs.Last().Id,
+                    ProductId = product.Id
+                });
+        });
+
+        var shoppingCart = harness.CreateController<global::Nop.Web.Controllers.ShoppingCartController>();
+        await Try(async () =>
+        {
+            var lists = await GetService<ICustomWishlistService>().GetAllCustomWishlistsAsync(admin.Id);
+            if (lists.Count > 0)
+                await shoppingCart.DeleteWishlist(lists.Last().Id);
+        });
+        await Try(async () =>
+        {
+            shoppingCart.ModelState.Clear();
+            await shoppingCart.ApplyDiscountCoupon("coverage-coupon", harness.CreateForm());
+            await shoppingCart.EmailWishlist();
+            await shoppingCart.EmailWishlistSend(new global::Nop.Web.Models.ShoppingCart.WishlistEmailAFriendModel
+            {
+                FriendEmail = "friend@example.com",
+                YourEmailAddress = admin.Email,
+                PersonalMessage = "Coverage"
+            }, true);
+        });
+
+        if (admin != null)
+            await GetService<IWorkContext>().SetCurrentCustomerAsync(admin);
+        harness.ClearWorkContextCaches();
     }
 
     [Test]
