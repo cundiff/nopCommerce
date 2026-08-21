@@ -36,6 +36,7 @@ using Nop.Core.Domain.Discounts;
 using Nop.Core.Domain.FilterLevels;
 using Nop.Core.Domain.Gdpr;
 using Nop.Core.Domain.Media;
+using Nop.Core.Domain.Menus;
 using Nop.Core.Domain.Messages;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
@@ -58,6 +59,7 @@ using Nop.Services.FilterLevels;
 using Nop.Services.Gdpr;
 using Nop.Services.Localization;
 using Nop.Services.Media;
+using Nop.Services.Menus;
 using Nop.Services.Messages;
 using Nop.Services.Orders;
 using Nop.Services.Payments;
@@ -2998,8 +3000,18 @@ public sealed class WebCoverageHarness
                     create.Sku = "COV" + Guid.NewGuid().ToString("N")[..6];
                     create.Published = true;
                     create.Price = 12;
+                    create.ProductTemplateId = 1;
+                    create.ProductTypeId = (int)ProductType.SimpleProduct;
+                    create.VisibleIndividually = true;
+                    create.IsShipEnabled = true;
+                    create.StockQuantity = 10;
+                    create.OrderMinimumQuantity = 1;
+                    create.OrderMaximumQuantity = 10000;
+                    create.ManageInventoryMethodId = (int)ManageInventoryMethod.DontManageStock;
                     productController.ModelState.Clear();
                     await productController.Create(create, true);
+                    productController.ModelState.Clear();
+                    await productController.Create(create, false);
                 });
 
                 await Try(async () =>
@@ -3761,9 +3773,6 @@ public sealed class WebCoverageHarness
                 model.SendTestEmailTo = "not-an-email";
                 emailController.ModelState.Clear();
                 await emailController.SendTestEmail(model);
-                model.SendTestEmailTo = "coverage-test@example.com";
-                emailController.ModelState.Clear();
-                await emailController.SendTestEmail(model);
                 await emailController.AuthReturn(new global::Google.Apis.Auth.OAuth2.Responses.AuthorizationCodeResponseUrl());
                 await emailController.AuthReturn(new global::Google.Apis.Auth.OAuth2.Responses.AuthorizationCodeResponseUrl
                 {
@@ -3794,19 +3803,23 @@ public sealed class WebCoverageHarness
         {
             var productController = CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
             var host = (await productService.SearchProductsAsync(pageSize: 1)).First();
-            productController.ModelState.Clear();
-            await productController.CopyProduct(new global::Nop.Web.Areas.Admin.Models.Catalog.ProductModel
+            await InvokeInstanceMethodAsync(productController, "CopyProduct", new global::Nop.Web.Areas.Admin.Models.Catalog.ProductModel
             {
                 CopyProductModel = new global::Nop.Web.Areas.Admin.Models.Catalog.CopyProductModel
                 {
                     Id = host.Id,
                     Name = "Coverage copy " + Guid.NewGuid().ToString("N")[..6],
                     Published = true,
-                    CopyMultimedia = true
+                    CopyMultimedia = false
                 }
             });
             await productController.SkuReservedWarning(host.Id, host.Sku);
             await productController.SkuReservedWarning(0, "COV-UNIQUE-" + Guid.NewGuid().ToString("N")[..6]);
+        });
+
+        await Try(async () =>
+        {
+            var productController = CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
             await productController.Create();
             var create = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductModel
             {
@@ -3814,6 +3827,7 @@ public sealed class WebCoverageHarness
                 Sku = "HMIN" + Guid.NewGuid().ToString("N")[..6],
                 Price = 9,
                 Published = true,
+                ProductTemplateId = 1,
                 ProductTypeId = (int)ProductType.SimpleProduct,
                 VisibleIndividually = true,
                 IsShipEnabled = true,
@@ -3824,6 +3838,14 @@ public sealed class WebCoverageHarness
             };
             productController.ModelState.Clear();
             await productController.Create(create, false);
+            productController.ModelState.Clear();
+            await productController.Create(create, true);
+        });
+
+        await Try(async () =>
+        {
+            var productController = CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
+            var host = (await productService.SearchProductsAsync(pageSize: 1)).First();
 
             var specService = _services.GetRequiredService<ISpecificationAttributeService>();
             var specs = await specService.GetProductSpecificationAttributesAsync(host.Id);
@@ -3989,7 +4011,7 @@ public sealed class WebCoverageHarness
             {
                 await pluginController.Uninstall(CreateForm(new Dictionary<string, string>
                 {
-                    ["uninstall-plugin-link-CurrencyExchange.TestProvider"] = "1"
+                    ["uninstall-plugin-link-DoesNotExist"] = "1"
                 }));
             }
             catch { }
@@ -3997,13 +4019,8 @@ public sealed class WebCoverageHarness
             {
                 await pluginController.Install(CreateForm(new Dictionary<string, string>
                 {
-                    ["install-plugin-link-CurrencyExchange.TestProvider"] = "1"
+                    ["install-plugin-link-DoesNotExist"] = "1"
                 }));
-            }
-            catch { }
-            try
-            {
-                await pluginController.UninstallAndDeleteUnusedPlugins(["Does.Not.Exist"]);
             }
             catch { }
         });
@@ -4123,6 +4140,783 @@ public sealed class WebCoverageHarness
             tables.Data = "[]";
             tables.UrlRead = new DataUrl("/coverage/list", true);
             await ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Shared__Table_Definition", tables);
+        });
+
+        await ExerciseLeftoverGoldAsync(admin, shopper, store);
+    }
+
+    private async Task ExerciseLeftoverGoldAsync(Customer admin, Customer shopper, Store store)
+    {
+        async Task Try(Func<Task> action)
+        {
+            try { await action(); } catch { }
+        }
+
+        var settingService = _services.GetRequiredService<ISettingService>();
+        var workContext = _services.GetRequiredService<IWorkContext>();
+        var productService = _services.GetRequiredService<IProductService>();
+        var orderService = _services.GetRequiredService<IOrderService>();
+        var customerService = _services.GetRequiredService<ICustomerService>();
+
+        await Try(async () =>
+        {
+            var ordered = (await orderService.SearchOrdersAsync(pageSize: 5)).FirstOrDefault();
+            var item = ordered == null ? null : (await orderService.GetOrderItemsAsync(ordered.Id)).FirstOrDefault();
+            var host = item != null
+                ? await productService.GetProductByIdAsync(item.ProductId)
+                : (await productService.SearchProductsAsync(pageSize: 1)).First();
+            var productFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
+            var specService = _services.GetRequiredService<ISpecificationAttributeService>();
+            var spec = (await specService.GetSpecificationAttributesWithOptionsAsync()).FirstOrDefault();
+            var option = spec == null
+                ? null
+                : (await specService.GetSpecificationAttributeOptionsBySpecificationAttributeAsync(spec.Id)).FirstOrDefault();
+            if (option != null)
+            {
+                foreach (var type in new[]
+                         {
+                             SpecificationAttributeType.Option,
+                             SpecificationAttributeType.CustomText,
+                             SpecificationAttributeType.CustomHtmlText,
+                             SpecificationAttributeType.Hyperlink
+                         })
+                {
+                    await specService.InsertProductSpecificationAttributeAsync(new ProductSpecificationAttribute
+                    {
+                        ProductId = host.Id,
+                        AttributeTypeId = (int)type,
+                        SpecificationAttributeOptionId = option.Id,
+                        CustomValue = type == SpecificationAttributeType.Hyperlink ? "https://example.com/coverage" : "coverage",
+                        ShowOnProductPage = true,
+                        AllowFiltering = type == SpecificationAttributeType.Option
+                    });
+                }
+            }
+
+            var specSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductSpecificationAttributeSearchModel { ProductId = host.Id };
+            specSearch.SetGridPageSize();
+            await productFactory.PrepareProductSpecificationAttributeListModelAsync(specSearch, host);
+
+            var attributeService = _services.GetRequiredService<IProductAttributeService>();
+            var mappings = await attributeService.GetProductAttributeMappingsByProductIdAsync(host.Id);
+            if (mappings.Count > 0)
+            {
+                var mapping = mappings[0];
+                await attributeService.InsertProductAttributeValueAsync(new ProductAttributeValue
+                {
+                    ProductAttributeMappingId = mapping.Id,
+                    AttributeValueType = AttributeValueType.Simple,
+                    Name = "Harvest pct",
+                    PriceAdjustment = 5,
+                    PriceAdjustmentUsePercentage = true,
+                    WeightAdjustment = 1,
+                    DisplayOrder = 50
+                });
+                var other = (await productService.SearchProductsAsync(pageSize: 2)).LastOrDefault() ?? host;
+                await attributeService.InsertProductAttributeValueAsync(new ProductAttributeValue
+                {
+                    ProductAttributeMappingId = mapping.Id,
+                    AttributeValueType = AttributeValueType.AssociatedToProduct,
+                    AssociatedProductId = other.Id,
+                    Name = "Harvest assoc",
+                    ColorSquaresRgb = "#112233",
+                    DisplayOrder = 51
+                });
+                var valueSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductAttributeValueSearchModel
+                {
+                    ProductAttributeMappingId = mapping.Id
+                };
+                valueSearch.SetGridPageSize();
+                await productFactory.PrepareProductAttributeValueListModelAsync(valueSearch, mapping);
+            }
+
+            if (!(await attributeService.GetAllProductAttributeCombinationsAsync(host.Id)).Any() && mappings.Count > 0)
+            {
+                await attributeService.InsertProductAttributeCombinationAsync(new ProductAttributeCombination
+                {
+                    ProductId = host.Id,
+                    AttributesXml = string.Empty,
+                    StockQuantity = 4,
+                    AllowOutOfStockOrders = true,
+                    Sku = "HCOM" + Guid.NewGuid().ToString("N")[..6],
+                    OverriddenPrice = 11
+                });
+            }
+
+            var comboSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductAttributeCombinationSearchModel { ProductId = host.Id };
+            comboSearch.SetGridPageSize();
+            await productFactory.PrepareProductAttributeCombinationListModelAsync(comboSearch, host);
+            var orderSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductOrderSearchModel { ProductId = host.Id };
+            orderSearch.SetGridPageSize();
+            await productFactory.PrepareProductOrderListModelAsync(orderSearch, host);
+            var pictureSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductPictureSearchModel { ProductId = host.Id };
+            pictureSearch.SetGridPageSize();
+            await productFactory.PrepareProductPictureListModelAsync(pictureSearch, host);
+            var videoSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductVideoSearchModel { ProductId = host.Id };
+            videoSearch.SetGridPageSize();
+            await productFactory.PrepareProductVideoListModelAsync(videoSearch, host);
+            var crossSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.CrossSellProductSearchModel { ProductId = host.Id };
+            crossSearch.SetGridPageSize();
+            await productFactory.PrepareCrossSellProductListModelAsync(crossSearch, host);
+            var tierSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.TierPriceSearchModel { ProductId = host.Id };
+            tierSearch.SetGridPageSize();
+            await productFactory.PrepareTierPriceListModelAsync(tierSearch, host);
+        });
+
+        await Try(async () =>
+        {
+            var catalogSettings = _services.GetRequiredService<CatalogSettings>();
+            var previousPrice = catalogSettings.EnablePriceRangeFiltering;
+            var previousSpecs = catalogSettings.EnableSpecificationAttributeFiltering;
+            var previousManu = catalogSettings.EnableManufacturerFiltering;
+            var previousSub = catalogSettings.ShowProductsFromSubcategories;
+            var previousTagPrice = catalogSettings.ProductsByTagPriceRangeFiltering;
+            var previousTagManual = catalogSettings.ProductsByTagManuallyPriceRange;
+            catalogSettings.EnablePriceRangeFiltering = true;
+            catalogSettings.EnableSpecificationAttributeFiltering = true;
+            catalogSettings.EnableManufacturerFiltering = true;
+            catalogSettings.ShowProductsFromSubcategories = true;
+            catalogSettings.ProductsByTagPriceRangeFiltering = true;
+            catalogSettings.ProductsByTagManuallyPriceRange = false;
+            await settingService.SaveSettingAsync(catalogSettings);
+            try
+            {
+                var catalogFactory = _services.GetRequiredService<global::Nop.Web.Factories.ICatalogModelFactory>();
+                var command = new global::Nop.Web.Models.Catalog.CatalogProductsCommand
+                {
+                    Price = "10-20",
+                    PageNumber = 1,
+                    PageSize = 6,
+                    OrderBy = (int)ProductSortingEnum.PriceAsc,
+                    Specs = [],
+                    Ms = []
+                };
+                await InvokeInstanceMethodAsync(catalogFactory, "GetConvertedPriceRangeAsync", command);
+                await InvokeInstanceMethodAsync(catalogFactory, "GetConvertedPriceRangeAsync",
+                    new global::Nop.Web.Models.Catalog.CatalogProductsCommand { Price = "30-10" });
+                await InvokeInstanceMethodAsync(catalogFactory, "GetConvertedPriceRangeAsync",
+                    new global::Nop.Web.Models.Catalog.CatalogProductsCommand { Price = "abc-5" });
+                await InvokeInstanceMethodAsync(catalogFactory, "GetConvertedPriceRangeAsync",
+                    new global::Nop.Web.Models.Catalog.CatalogProductsCommand { Price = "5-" });
+                await InvokeInstanceMethodAsync(catalogFactory, "GetConvertedPriceRangeAsync",
+                    new global::Nop.Web.Models.Catalog.CatalogProductsCommand { Price = "-8" });
+                await InvokeInstanceMethodAsync(catalogFactory, "GetConvertedPriceRangeAsync",
+                    new global::Nop.Web.Models.Catalog.CatalogProductsCommand { Price = "not-a-range" });
+
+                var category = (await _services.GetRequiredService<ICategoryService>().GetAllCategoriesAsync(showHidden: true)).FirstOrDefault();
+                if (category != null)
+                {
+                    var previousFiltering = category.PriceRangeFiltering;
+                    var previousManual = category.ManuallyPriceRange;
+                    category.PriceRangeFiltering = true;
+                    category.ManuallyPriceRange = false;
+                    await _services.GetRequiredService<ICategoryService>().UpdateCategoryAsync(category);
+                    await catalogFactory.PrepareCategoryProductsModelAsync(category, command);
+                    category.ManuallyPriceRange = true;
+                    category.PriceFrom = 1;
+                    category.PriceTo = 50;
+                    await _services.GetRequiredService<ICategoryService>().UpdateCategoryAsync(category);
+                    await catalogFactory.PrepareCategoryProductsModelAsync(category, command);
+                    category.PriceRangeFiltering = previousFiltering;
+                    category.ManuallyPriceRange = previousManual;
+                    await _services.GetRequiredService<ICategoryService>().UpdateCategoryAsync(category);
+                }
+
+                var manufacturer = (await _services.GetRequiredService<IManufacturerService>()
+                    .GetAllManufacturersAsync(showHidden: true)).FirstOrDefault();
+                if (manufacturer != null)
+                {
+                    var previousFiltering = manufacturer.PriceRangeFiltering;
+                    var previousManual = manufacturer.ManuallyPriceRange;
+                    manufacturer.PriceRangeFiltering = true;
+                    manufacturer.ManuallyPriceRange = false;
+                    await _services.GetRequiredService<IManufacturerService>().UpdateManufacturerAsync(manufacturer);
+                    await catalogFactory.PrepareManufacturerProductsModelAsync(manufacturer, command);
+                    manufacturer.PriceRangeFiltering = previousFiltering;
+                    manufacturer.ManuallyPriceRange = previousManual;
+                    await _services.GetRequiredService<IManufacturerService>().UpdateManufacturerAsync(manufacturer);
+                }
+
+                var vendor = (await _services.GetRequiredService<IVendorService>().GetAllVendorsAsync()).FirstOrDefault();
+                if (vendor != null)
+                {
+                    var previousFiltering = vendor.PriceRangeFiltering;
+                    var previousManual = vendor.ManuallyPriceRange;
+                    vendor.PriceRangeFiltering = true;
+                    vendor.ManuallyPriceRange = false;
+                    await _services.GetRequiredService<IVendorService>().UpdateVendorAsync(vendor);
+                    await catalogFactory.PrepareVendorProductsModelAsync(vendor, command);
+                    var customerSettings = _services.GetRequiredService<CustomerSettings>();
+                    var previousAvatars = customerSettings.AllowCustomersToUploadAvatars;
+                    var previousProfiles = customerSettings.AllowViewingProfiles;
+                    customerSettings.AllowCustomersToUploadAvatars = true;
+                    customerSettings.AllowViewingProfiles = true;
+                    await settingService.SaveSettingAsync(customerSettings);
+                    await catalogFactory.PrepareVendorProductReviewsModelAsync(vendor,
+                        new global::Nop.Web.Models.Catalog.VendorReviewsPagingFilteringModel { PageNumber = 1, PageSize = 6 });
+                    customerSettings.AllowCustomersToUploadAvatars = previousAvatars;
+                    customerSettings.AllowViewingProfiles = previousProfiles;
+                    await settingService.SaveSettingAsync(customerSettings);
+                    vendor.PriceRangeFiltering = previousFiltering;
+                    vendor.ManuallyPriceRange = previousManual;
+                    await _services.GetRequiredService<IVendorService>().UpdateVendorAsync(vendor);
+                }
+
+                var tag = (await _services.GetRequiredService<IProductTagService>().GetAllProductTagsAsync()).FirstOrDefault();
+                if (tag != null)
+                    await catalogFactory.PrepareTagProductsModelAsync(tag, command);
+            }
+            finally
+            {
+                catalogSettings.EnablePriceRangeFiltering = previousPrice;
+                catalogSettings.EnableSpecificationAttributeFiltering = previousSpecs;
+                catalogSettings.EnableManufacturerFiltering = previousManu;
+                catalogSettings.ShowProductsFromSubcategories = previousSub;
+                catalogSettings.ProductsByTagPriceRangeFiltering = previousTagPrice;
+                catalogSettings.ProductsByTagManuallyPriceRange = previousTagManual;
+                await settingService.SaveSettingAsync(catalogSettings);
+            }
+        });
+
+        await Try(async () =>
+        {
+            var countryService = _services.GetRequiredService<ICountryService>();
+            var countries = await countryService.GetAllCountriesAsync(showHidden: true);
+            var country = countries.FirstOrDefault(item => item.AllowsBilling) ?? countries.First();
+            var countryController = CreateController<global::Nop.Web.Areas.Admin.Controllers.CountryController>();
+            await countryController.GetStatesByCountryId(country.Id.ToString(), true, true);
+            await countryController.GetStatesByCountryId(country.Id.ToString(), true, false);
+            await countryController.GetStatesByCountryId(country.Id.ToString(), false, false);
+            await countryController.GetStatesByCountryId("0", true, false);
+            await countryController.GetStatesByCountryId("0", false, false);
+            var emptyCountry = new Country
+            {
+                Name = "CoverageLand",
+                TwoLetterIsoCode = "ZX",
+                ThreeLetterIsoCode = "ZXX",
+                Published = true
+            };
+            await countryService.InsertCountryAsync(emptyCountry);
+            await countryController.GetStatesByCountryId(emptyCountry.Id.ToString(), true, false);
+            await countryController.GetStatesByCountryId(emptyCountry.Id.ToString(), false, false);
+            var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICountryModelFactory>();
+            var stateModel = await factory.PrepareStateProvinceModelAsync(null, country, null);
+            stateModel.Name = "CoverageState" + Guid.NewGuid().ToString("N")[..4];
+            stateModel.Abbreviation = "CS";
+            countryController.ModelState.Clear();
+            await countryController.StateCreatePopup(stateModel);
+            var created = (await _services.GetRequiredService<IStateProvinceService>()
+                .GetStateProvincesByCountryIdAsync(country.Id, showHidden: true))
+                .FirstOrDefault(item => item.Name.StartsWith("CoverageState", StringComparison.Ordinal));
+            if (created != null)
+            {
+                await countryController.StateEditPopup(created.Id);
+                var edit = await factory.PrepareStateProvinceModelAsync(null, country, created);
+                edit.Name = created.Name + "X";
+                countryController.ModelState.Clear();
+                await countryController.StateEditPopup(edit);
+            }
+        });
+
+        await Try(async () =>
+        {
+            var giftController = CreateController<global::Nop.Web.Areas.Admin.Controllers.GiftCardController>();
+            giftController.GenerateCouponCode();
+            var create = new global::Nop.Web.Areas.Admin.Models.Orders.GiftCardModel
+            {
+                GiftCardCouponCode = "HGC" + Guid.NewGuid().ToString("N")[..8],
+                Amount = 25,
+                IsGiftCardActivated = true,
+                GiftCardTypeId = (int)GiftCardType.Virtual,
+                RecipientName = "Harvest",
+                RecipientEmail = "harvest-gift@example.com",
+                SenderName = "Admin",
+                SenderEmail = admin.Email,
+                Message = "coverage"
+            };
+            giftController.ModelState.Clear();
+            await giftController.Create(create, true);
+            var cards = await _services.GetRequiredService<IGiftCardService>().GetAllGiftCardsAsync();
+            var card = cards.LastOrDefault() ?? cards.FirstOrDefault();
+            if (card != null)
+            {
+                await giftController.Edit(card.Id);
+                var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IGiftCardModelFactory>();
+                var model = await factory.PrepareGiftCardModelAsync(null, card);
+                model.Message = "updated coverage";
+                giftController.ModelState.Clear();
+                await giftController.Edit(model, true);
+                giftController.ModelState.Clear();
+                await giftController.Edit(model, false);
+                var history = new global::Nop.Web.Areas.Admin.Models.Orders.GiftCardUsageHistorySearchModel { GiftCardId = card.Id };
+                history.SetGridPageSize();
+                await giftController.UsageHistoryList(history);
+            }
+        });
+
+        await Try(async () =>
+        {
+            var emails = await _services.GetRequiredService<IEmailAccountService>().GetAllEmailAccountsAsync();
+            var account = emails.FirstOrDefault();
+            var campaignController = CreateController<global::Nop.Web.Areas.Admin.Controllers.CampaignController>();
+            var create = new global::Nop.Web.Areas.Admin.Models.Messages.CampaignModel
+            {
+                Name = "Harvest campaign " + Guid.NewGuid().ToString("N")[..6],
+                Subject = "Harvest subject",
+                Body = "<p>coverage</p>",
+                StoreId = store.Id,
+                EmailAccountId = account?.Id ?? 0
+            };
+            campaignController.ModelState.Clear();
+            await campaignController.Create(create, true);
+            var campaigns = await _services.GetRequiredService<ICampaignService>().GetAllCampaignsAsync();
+            var campaign = campaigns.LastOrDefault() ?? campaigns.FirstOrDefault();
+            if (campaign != null)
+            {
+                await campaignController.Edit(campaign.Id);
+                var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICampaignModelFactory>();
+                var model = await factory.PrepareCampaignModelAsync(null, campaign);
+                model.Subject = model.Subject + " x";
+                campaignController.ModelState.Clear();
+                await campaignController.Edit(model, true);
+                campaignController.ModelState.Clear();
+                await campaignController.CopyCampaign(new global::Nop.Web.Areas.Admin.Models.Messages.CampaignModel
+                {
+                    CopyCampaignModel = new global::Nop.Web.Areas.Admin.Models.Messages.CopyCampaignModel
+                    {
+                        OriginalCampaignId = campaign.Id,
+                        Name = "Harvest copy " + Guid.NewGuid().ToString("N")[..6]
+                    }
+                });
+            }
+        });
+
+        await Try(async () =>
+        {
+            var checkoutAttributes = _services.GetRequiredService<IAttributeService<CheckoutAttribute, CheckoutAttributeValue>>();
+            var attributes = await checkoutAttributes.GetAllAttributesAsync();
+            var dropdown = attributes.FirstOrDefault(item => item.AttributeControlType is AttributeControlType.DropdownList
+                or AttributeControlType.RadioList or AttributeControlType.Checkboxes)
+                ?? attributes.FirstOrDefault();
+            var target = attributes.FirstOrDefault(item => item.Id != dropdown?.Id) ?? dropdown;
+            if (target != null && dropdown != null)
+            {
+                var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICheckoutAttributeModelFactory>();
+                var model = await factory.PrepareCheckoutAttributeModelAsync(null, target);
+                var values = await checkoutAttributes.GetAttributeValuesAsync(dropdown.Id);
+                model.ConditionModel.EnableCondition = true;
+                model.ConditionModel.SelectedAttributeId = dropdown.Id;
+                model.ConditionModel.ConditionAttributes =
+                [
+                    new global::Nop.Web.Areas.Admin.Models.Orders.AttributeConditionModel
+                    {
+                        Id = dropdown.Id,
+                        Name = dropdown.Name,
+                        AttributeControlType = dropdown.AttributeControlType,
+                        SelectedValueId = values.FirstOrDefault()?.Id.ToString() ?? string.Empty,
+                        Values = values.Select(value => new Microsoft.AspNetCore.Mvc.Rendering.SelectListItem
+                        {
+                            Value = value.Id.ToString(),
+                            Text = value.Name,
+                            Selected = true
+                        }).ToList()
+                    }
+                ];
+                var controller = CreateController<global::Nop.Web.Areas.Admin.Controllers.CheckoutAttributeController>();
+                controller.ModelState.Clear();
+                await controller.Edit(model, true);
+                await controller.ValueCreatePopup(dropdown.Id);
+                var valueModel = new global::Nop.Web.Areas.Admin.Models.Orders.CheckoutAttributeValueModel
+                {
+                    AttributeId = dropdown.Id,
+                    Name = "Harvest CA " + Guid.NewGuid().ToString("N")[..4],
+                    ColorSquaresRgb = "#00ff00"
+                };
+                controller.ModelState.Clear();
+                await controller.ValueCreatePopup(valueModel);
+                var created = (await checkoutAttributes.GetAttributeValuesAsync(dropdown.Id))
+                    .FirstOrDefault(item => item.Name.StartsWith("Harvest CA", StringComparison.Ordinal));
+                if (created != null)
+                {
+                    await controller.ValueEditPopup(created.Id);
+                    var edit = await factory.PrepareCheckoutAttributeValueModelAsync(null, dropdown, created);
+                    edit.Name = created.Name + "x";
+                    controller.ModelState.Clear();
+                    await controller.ValueEditPopup(edit);
+                }
+
+                var color = new CheckoutAttribute
+                {
+                    Name = "Harvest color " + Guid.NewGuid().ToString("N")[..4],
+                    AttributeControlType = AttributeControlType.ColorSquares
+                };
+                await checkoutAttributes.InsertAttributeAsync(color);
+                controller.ModelState.Clear();
+                await controller.ValueCreatePopup(new global::Nop.Web.Areas.Admin.Models.Orders.CheckoutAttributeValueModel
+                {
+                    AttributeId = color.Id,
+                    Name = "Red",
+                    ColorSquaresRgb = "not-a-color"
+                });
+                controller.ModelState.Clear();
+                await controller.ValueCreatePopup(new global::Nop.Web.Areas.Admin.Models.Orders.CheckoutAttributeValueModel
+                {
+                    AttributeId = color.Id,
+                    Name = "Red",
+                    ColorSquaresRgb = "#ff0000"
+                });
+            }
+        });
+
+        await Try(async () =>
+        {
+            var specController = CreateController<global::Nop.Web.Areas.Admin.Controllers.SpecificationAttributeController>();
+            var specService = _services.GetRequiredService<ISpecificationAttributeService>();
+            var spec = (await specService.GetSpecificationAttributesWithOptionsAsync()).FirstOrDefault();
+            if (spec == null)
+                return;
+            await specController.OptionCreatePopup(spec.Id);
+            var optionModel = new global::Nop.Web.Areas.Admin.Models.Catalog.SpecificationAttributeOptionModel
+            {
+                SpecificationAttributeId = spec.Id,
+                Name = "Harvest opt " + Guid.NewGuid().ToString("N")[..4],
+                EnableColorSquaresRgb = true,
+                ColorSquaresRgb = "#abcdef"
+            };
+            specController.ModelState.Clear();
+            await specController.OptionCreatePopup(optionModel);
+            optionModel.EnableColorSquaresRgb = false;
+            specController.ModelState.Clear();
+            await specController.OptionCreatePopup(optionModel);
+            var option = (await specService.GetSpecificationAttributeOptionsBySpecificationAttributeAsync(spec.Id))
+                .FirstOrDefault(item => item.Name.StartsWith("Harvest opt", StringComparison.Ordinal));
+            if (option != null)
+            {
+                await specController.OptionEditPopup(option.Id);
+                var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ISpecificationAttributeModelFactory>();
+                var edit = await factory.PrepareSpecificationAttributeOptionModelAsync(null, spec, option);
+                edit.Name = option.Name + "x";
+                edit.EnableColorSquaresRgb = false;
+                specController.ModelState.Clear();
+                await specController.OptionEditPopup(edit);
+                await specController.GetOptionsByAttributeId(spec.Id.ToString());
+            }
+
+            var group = new SpecificationAttributeGroup { Name = "Harvest group " + Guid.NewGuid().ToString("N")[..4] };
+            await specService.InsertSpecificationAttributeGroupAsync(group);
+            await specController.EditSpecificationAttributeGroup(group.Id);
+            var groupModel = new global::Nop.Web.Areas.Admin.Models.Catalog.SpecificationAttributeGroupModel
+            {
+                Id = group.Id,
+                Name = group.Name + "x"
+            };
+            specController.ModelState.Clear();
+            await specController.EditSpecificationAttributeGroup(groupModel, true);
+        });
+
+        await Try(async () =>
+        {
+            var shipping = CreateController<global::Nop.Web.Areas.Admin.Controllers.ShippingController>();
+            var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IShippingModelFactory>();
+            var model = await factory.PrepareWarehouseModelAsync(new global::Nop.Web.Areas.Admin.Models.Shipping.WarehouseModel(), null);
+            model.Name = "Harvest warehouse " + Guid.NewGuid().ToString("N")[..4];
+            var countries = await _services.GetRequiredService<ICountryService>().GetAllCountriesAsync(showHidden: true);
+            var country = countries.FirstOrDefault();
+            var state = country == null
+                ? null
+                : (await _services.GetRequiredService<IStateProvinceService>()
+                    .GetStateProvincesByCountryIdAsync(country.Id, showHidden: true)).FirstOrDefault();
+            model.Address.FirstName = "Ann";
+            model.Address.LastName = "Admin";
+            model.Address.Email = admin.Email;
+            model.Address.CountryId = country?.Id;
+            model.Address.StateProvinceId = state?.Id;
+            model.Address.City = "New York";
+            model.Address.Address1 = "1 Coverage";
+            model.Address.ZipPostalCode = "10001";
+            shipping.ModelState.Clear();
+            await shipping.CreateWarehouse(model, true);
+            var warehouses = await _services.GetRequiredService<IWarehouseService>().GetAllWarehousesAsync();
+            var warehouse = warehouses.LastOrDefault(item => item.Name.StartsWith("Harvest warehouse", StringComparison.Ordinal))
+                            ?? warehouses.FirstOrDefault();
+            if (warehouse != null)
+            {
+                await shipping.EditWarehouse(warehouse.Id);
+                var edit = await factory.PrepareWarehouseModelAsync(null, warehouse);
+                edit.AdminComment = "coverage";
+                shipping.ModelState.Clear();
+                await shipping.EditWarehouse(edit, true);
+            }
+        });
+
+        await Try(async () =>
+        {
+            var host = (await productService.SearchProductsAsync(pageSize: 1)).First();
+            var manufacturer = (await _services.GetRequiredService<IManufacturerService>()
+                .GetAllManufacturersAsync(showHidden: true)).FirstOrDefault();
+            if (manufacturer != null)
+            {
+                var controller = CreateController<global::Nop.Web.Areas.Admin.Controllers.ManufacturerController>();
+                controller.ModelState.Clear();
+                await controller.ProductAddPopup(new global::Nop.Web.Areas.Admin.Models.Catalog.AddProductToManufacturerModel
+                {
+                    ManufacturerId = manufacturer.Id,
+                    SelectedProductIds = [host.Id]
+                });
+            }
+
+            var category = (await _services.GetRequiredService<ICategoryService>().GetAllCategoriesAsync(showHidden: true)).FirstOrDefault();
+            if (category != null)
+            {
+                var controller = CreateController<global::Nop.Web.Areas.Admin.Controllers.CategoryController>();
+                controller.ModelState.Clear();
+                await controller.ProductAddPopup(new global::Nop.Web.Areas.Admin.Models.Catalog.AddProductToCategoryModel
+                {
+                    CategoryId = category.Id,
+                    SelectedProductIds = [host.Id]
+                });
+            }
+
+            var discount = (await _services.GetRequiredService<IDiscountService>().GetAllDiscountsAsync()).FirstOrDefault();
+            if (discount != null)
+            {
+                var controller = CreateController<global::Nop.Web.Areas.Admin.Controllers.DiscountController>();
+                controller.ModelState.Clear();
+                await controller.ProductAddPopup(new global::Nop.Web.Areas.Admin.Models.Discounts.AddProductToDiscountModel
+                {
+                    DiscountId = discount.Id,
+                    SelectedProductIds = [host.Id]
+                });
+            }
+        });
+
+        await Try(async () =>
+        {
+            var language = (await _services.GetRequiredService<ILanguageService>().GetAllLanguagesAsync(true)).First();
+            var languageController = CreateController<global::Nop.Web.Areas.Admin.Controllers.LanguageController>();
+            await languageController.LanguageCultureWarning("en-US", "en-US");
+            await languageController.LanguageCultureWarning("en-US", "fr-FR");
+            languageController.ModelState.Clear();
+            await languageController.ResourceAdd(language.Id, new global::Nop.Web.Areas.Admin.Models.Localization.LocaleResourceModel
+            {
+                LanguageId = language.Id,
+                ResourceName = "coverage.harvest." + Guid.NewGuid().ToString("N"),
+                ResourceValue = "harvest"
+            });
+            var existing = await _services.GetRequiredService<ILocalizationService>()
+                .GetLocaleStringResourceByNameAsync("admin.common.save", language.Id, false);
+            if (existing != null)
+            {
+                languageController.ModelState.Clear();
+                await languageController.ResourceUpdate(new global::Nop.Web.Areas.Admin.Models.Localization.LocaleResourceModel
+                {
+                    Id = existing.Id,
+                    LanguageId = language.Id,
+                    ResourceName = existing.ResourceName,
+                    ResourceValue = existing.ResourceValue
+                });
+                languageController.ModelState.Clear();
+                await languageController.ResourceUpdate(new global::Nop.Web.Areas.Admin.Models.Localization.LocaleResourceModel
+                {
+                    Id = existing.Id,
+                    LanguageId = language.Id,
+                    ResourceName = "coverage.duplicate." + Guid.NewGuid().ToString("N"),
+                    ResourceValue = "x"
+                });
+            }
+        });
+
+        await Try(async () =>
+        {
+            var menus = await _services.GetRequiredService<IMenuService>().GetAllMenusAsync(showHidden: true);
+            var menu = menus.FirstOrDefault();
+            if (menu == null)
+                return;
+            var menuController = CreateController<global::Nop.Web.Areas.Admin.Controllers.MenuController>();
+            var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IMenuModelFactory>();
+            var category = (await _services.GetRequiredService<ICategoryService>().GetAllCategoriesAsync(showHidden: true)).FirstOrDefault();
+            var manufacturer = (await _services.GetRequiredService<IManufacturerService>()
+                .GetAllManufacturersAsync(showHidden: true)).FirstOrDefault();
+            var host = (await productService.SearchProductsAsync(pageSize: 1)).First();
+            var vendor = (await _services.GetRequiredService<IVendorService>().GetAllVendorsAsync()).FirstOrDefault();
+            foreach (var (type, categoryId, manufacturerId, productId, vendorId, url) in new (MenuItemType, int, int, int, int, string)[]
+                     {
+                         (MenuItemType.CustomLink, 0, 0, 0, 0, "/coverage"),
+                         (MenuItemType.Text, 0, 0, 0, 0, null),
+                         (MenuItemType.StandardPage, 0, 0, 0, 0, null),
+                         (MenuItemType.Category, category?.Id ?? 0, 0, 0, 0, null),
+                         (MenuItemType.Manufacturer, 0, manufacturer?.Id ?? 0, 0, 0, null),
+                         (MenuItemType.Product, 0, 0, host.Id, 0, null),
+                         (MenuItemType.Vendor, 0, 0, 0, vendor?.Id ?? 0, null)
+                     })
+            {
+                var item = await factory.PrepareMenuItemModelAsync(menu, new global::Nop.Web.Areas.Admin.Models.Menus.MenuItemModel(), null);
+                item.Title = "Harvest " + type;
+                item.MenuId = menu.Id;
+                item.MenuItemTypeId = (int)type;
+                item.CategoryId = categoryId;
+                item.ManufacturerId = manufacturerId;
+                item.ProductId = productId;
+                item.VendorId = vendorId;
+                item.Url = url;
+                item.TemplateId = (int)MenuItemTemplate.Simple;
+                menuController.ModelState.Clear();
+                await menuController.MenuItemCreate(item, true);
+                menuController.ModelState.Clear();
+                await menuController.MenuItemCreate(item, false);
+            }
+
+            var created = (await _services.GetRequiredService<IMenuService>().GetAllMenuItemsAsync(menu.Id, showHidden: true))
+                .FirstOrDefault(item => item.Title.StartsWith("Harvest ", StringComparison.Ordinal));
+            if (created != null)
+            {
+                await menuController.MenuItemEdit(created.Id);
+                var edit = await factory.PrepareMenuItemModelAsync(menu, null, created);
+                edit.Title = created.Title + "x";
+                menuController.ModelState.Clear();
+                await menuController.MenuItemEdit(edit, true);
+            }
+        });
+
+        await Try(async () =>
+        {
+            var publicMenu = _services.GetRequiredService<global::Nop.Web.Factories.IMenuModelFactory>();
+            await publicMenu.PrepareMenuModelsAsync(MenuType.Main);
+            await publicMenu.PrepareMenuModelsAsync(MenuType.Footer);
+            var category = (await _services.GetRequiredService<ICategoryService>().GetAllCategoriesAsync(showHidden: true)).FirstOrDefault();
+            var manufacturer = (await _services.GetRequiredService<IManufacturerService>()
+                .GetAllManufacturersAsync(showHidden: true)).FirstOrDefault();
+            var host = (await productService.SearchProductsAsync(pageSize: 1)).First();
+            var vendor = (await _services.GetRequiredService<IVendorService>().GetAllVendorsAsync()).FirstOrDefault();
+            foreach (var entityId in new int?[] { 0, category?.Id, 999999 })
+                await InvokeInstanceMethodAsync(publicMenu, "GetAuthorizedCategoryInfoAsync", new MenuItem { EntityId = entityId, Title = "c" });
+            foreach (var entityId in new int?[] { 0, manufacturer?.Id, 999999 })
+                await InvokeInstanceMethodAsync(publicMenu, "GetAuthorizedManufacturerInfoAsync", new MenuItem { EntityId = entityId, Title = "m" });
+            foreach (var entityId in new int?[] { 0, host.Id, 999999 })
+                await InvokeInstanceMethodAsync(publicMenu, "GetAuthorizedProductInfoAsync", new MenuItem { EntityId = entityId, Title = "p" });
+            foreach (var entityId in new int?[] { 0, vendor?.Id, 999999 })
+                await InvokeInstanceMethodAsync(publicMenu, "GetAuthorizedVendorInfoAsync", new MenuItem { EntityId = entityId, Title = "v" });
+            await InvokeInstanceMethodAsync(publicMenu, "GetAuthorizedTopicInfoAsync", new MenuItem { EntityId = 0, Title = "t" });
+            await InvokeInstanceMethodAsync(publicMenu, "GetAuthorizedTopicInfoAsync", new MenuItem { EntityId = 999999, Title = "t" });
+            if (category != null)
+            {
+                await InvokeInstanceMethodAsync(publicMenu, "PrepareSubMenuItemsAsync",
+                    new global::Nop.Web.Models.Menus.MenuItemModel
+                    {
+                        MenuItemType = MenuItemType.Category,
+                        Template = MenuItemTemplate.List,
+                        EntityId = category.Id,
+                        NumberOfSubItemsPerGridElement = 4,
+                        MaximumNumberEntities = 8
+                    }, 4, true);
+                await InvokeInstanceMethodAsync(publicMenu, "PrepareSubMenuItemsAsync",
+                    new global::Nop.Web.Models.Menus.MenuItemModel
+                    {
+                        MenuItemType = MenuItemType.Manufacturer,
+                        Template = MenuItemTemplate.Grid,
+                        NumberOfSubItemsPerGridElement = 4
+                    }, 4, false);
+            }
+        });
+
+        await Try(async () =>
+        {
+            var filterSettings = _services.GetRequiredService<FilterLevelSettings>();
+            var previousDisabled = filterSettings.FilterLevelEnumDisabled?.ToList() ?? [];
+            filterSettings.FilterLevelEnumDisabled = [(int)FilterLevelEnum.FilterLevel1];
+            await settingService.SaveSettingAsync(filterSettings);
+            var settings = CreateController<global::Nop.Web.Areas.Admin.Controllers.SettingController>();
+            await settings.EditFilterLevel((int)FilterLevelEnum.FilterLevel2);
+            var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ISettingModelFactory>();
+            var child = await factory.PrepareFilterLevelModelAsync(null, FilterLevelEnum.FilterLevel2);
+            child.Enabled = true;
+            settings.ModelState.Clear();
+            await settings.EditFilterLevel(child, true);
+            filterSettings.FilterLevelEnumDisabled = [];
+            await settingService.SaveSettingAsync(filterSettings);
+            var parent = await factory.PrepareFilterLevelModelAsync(null, FilterLevelEnum.FilterLevel1);
+            parent.Enabled = false;
+            settings.ModelState.Clear();
+            await settings.EditFilterLevel(parent, false);
+            var level1 = await factory.PrepareFilterLevelModelAsync(null, FilterLevelEnum.FilterLevel1);
+            level1.Enabled = true;
+            settings.ModelState.Clear();
+            await settings.EditFilterLevel(level1, true);
+            filterSettings.FilterLevelEnumDisabled = previousDisabled;
+            await settingService.SaveSettingAsync(filterSettings);
+        });
+
+        await Try(async () =>
+        {
+            var returns = _services.GetRequiredService<IReturnRequestService>();
+            var existing = (await returns.SearchReturnRequestsAsync(pageSize: 1)).FirstOrDefault();
+            if (existing == null)
+            {
+                var order = (await orderService.SearchOrdersAsync(pageSize: 1)).FirstOrDefault();
+                var item = order == null ? null : (await orderService.GetOrderItemsAsync(order.Id)).FirstOrDefault();
+                if (item == null)
+                    return;
+                existing = new ReturnRequest
+                {
+                    StoreId = store.Id,
+                    OrderItemId = item.Id,
+                    CustomerId = admin.Id,
+                    Quantity = 1,
+                    ReturnedQuantity = 0,
+                    ReasonForReturn = "coverage",
+                    RequestedAction = "Refund",
+                    CustomerComments = "coverage",
+                    StaffNotes = string.Empty,
+                    ReturnRequestStatus = ReturnRequestStatus.Pending,
+                    CreatedOnUtc = DateTime.UtcNow,
+                    UpdatedOnUtc = DateTime.UtcNow,
+                    CustomNumber = "H" + Guid.NewGuid().ToString("N")[..6]
+                };
+                await returns.InsertReturnRequestAsync(existing);
+            }
+
+            var controller = CreateController<global::Nop.Web.Areas.Admin.Controllers.ReturnRequestController>();
+            await controller.Edit(existing.Id);
+            var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IReturnRequestModelFactory>();
+            var model = await factory.PrepareReturnRequestModelAsync(null, existing);
+            model.ReturnedQuantity = existing.ReturnedQuantity + 1;
+            model.StaffNotes = "coverage";
+            controller.ModelState.Clear();
+            await controller.Edit(model, true);
+            model.ReturnedQuantity = -1;
+            controller.ModelState.Clear();
+            await controller.Edit(model, false);
+        });
+
+        await Try(async () =>
+        {
+            var orderSettings = _services.GetRequiredService<OrderSettings>();
+            var previousDisabled = orderSettings.CheckoutDisabled;
+            var previousAnonymous = orderSettings.AnonymousCheckoutAllowed;
+            var previousOpc = orderSettings.OnePageCheckoutEnabled;
+            var checkout = CreateController<global::Nop.Web.Controllers.CheckoutController>();
+            orderSettings.CheckoutDisabled = true;
+            await settingService.SaveSettingAsync(orderSettings);
+            await checkout.Index();
+            orderSettings.CheckoutDisabled = false;
+            orderSettings.AnonymousCheckoutAllowed = false;
+            orderSettings.OnePageCheckoutEnabled = false;
+            await settingService.SaveSettingAsync(orderSettings);
+            var guest = await customerService.InsertGuestCustomerAsync();
+            await workContext.SetCurrentCustomerAsync(guest);
+            ClearWorkContextCaches();
+            await checkout.Index();
+            await workContext.SetCurrentCustomerAsync(admin);
+            ClearWorkContextCaches();
+            await EnsurePlainProductInCartAsync();
+            orderSettings.AnonymousCheckoutAllowed = true;
+            await settingService.SaveSettingAsync(orderSettings);
+            await checkout.Index();
+            orderSettings.CheckoutDisabled = previousDisabled;
+            orderSettings.AnonymousCheckoutAllowed = previousAnonymous;
+            orderSettings.OnePageCheckoutEnabled = previousOpc;
+            await settingService.SaveSettingAsync(orderSettings);
+            await EnsurePlainProductInCartAsync();
         });
     }
 
