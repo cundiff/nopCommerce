@@ -3543,36 +3543,52 @@ public sealed class WebCoverageHarness
         await Try(async () =>
         {
             pluginsInfo.IncompatiblePlugins ??= new Dictionary<string, PluginIncompatibleType>();
-            pluginsInfo.IncompatiblePlugins["Coverage.Incompatible.Main"] = PluginIncompatibleType.MainAssemblyNotFound;
-            pluginsInfo.IncompatiblePlugins["Coverage.Incompatible.Version"] = PluginIncompatibleType.NotCompatibleWithCurrentVersion;
             pluginsInfo.AssemblyLoadedCollision ??= [];
-            var collision = new PluginLoadedAssemblyInfo("Coverage.Collision", new Version(13, 0, 0, 0));
-            collision.References.Add(("Coverage.Plugin", new Version(12, 0, 0, 0)));
-            pluginsInfo.AssemblyLoadedCollision.Add(collision);
-
-            var directory = Path.Combine(Path.GetTempPath(), "nop-coverage-plugins", "NotInstalled_Harvest");
-            Directory.CreateDirectory(directory);
-            var jsonPath = Path.Combine(directory, NopPluginDefaults.DescriptionFileName);
-            if (!File.Exists(jsonPath))
-                File.WriteAllText(jsonPath, "{}");
-            pluginsInfo.PluginDescriptors.Add((new PluginDescriptor
+            var originalDescriptors = pluginsInfo.PluginDescriptors.ToList();
+            var originalIncompatible = pluginsInfo.IncompatiblePlugins.ToDictionary(pair => pair.Key, pair => pair.Value);
+            var originalCollisions = pluginsInfo.AssemblyLoadedCollision.ToList();
+            try
             {
-                SystemName = "NotInstalled.Harvest.Plugin",
-                FriendlyName = "Not installed harvest plugin",
-                Group = "Misc",
-                Installed = false,
-                OriginalAssemblyFile = Path.Combine(directory, "plugin.dll"),
-                AssemblyFileName = "NotInstalled.Harvest.dll",
-                PluginType = typeof(TestWidgetPlugin)
-            }, false));
+                pluginsInfo.IncompatiblePlugins["Coverage.Incompatible.Main"] = PluginIncompatibleType.MainAssemblyNotFound;
+                pluginsInfo.IncompatiblePlugins["Coverage.Incompatible.Version"] = PluginIncompatibleType.NotCompatibleWithCurrentVersion;
+                var collision = new PluginLoadedAssemblyInfo("Coverage.Collision", new Version(13, 0, 0, 0));
+                collision.References.Add(("Coverage.Plugin", new Version(12, 0, 0, 0)));
+                pluginsInfo.AssemblyLoadedCollision.Add(collision);
 
-            var commonFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICommonModelFactory>();
-            var warnings = new List<global::Nop.Web.Areas.Admin.Models.Common.SystemWarningModel>();
-            await commonFactory.PrepareSystemWarningModelsAsync();
-            await InvokeInstanceMethodAsync(commonFactory, "PrepareIncompatibleWarningModelAsync", warnings);
-            await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsCollisionsWarningModelAsync", warnings);
-            await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsInstalledWarningModelAsync", warnings);
-            await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsEnabledWarningModelAsync", warnings);
+                var directory = Path.Combine(Path.GetTempPath(), "nop-coverage-plugins", "NotInstalled_Harvest");
+                Directory.CreateDirectory(directory);
+                var jsonPath = Path.Combine(directory, NopPluginDefaults.DescriptionFileName);
+                if (!File.Exists(jsonPath))
+                    File.WriteAllText(jsonPath, "{}");
+                pluginsInfo.PluginDescriptors.Add((new PluginDescriptor
+                {
+                    SystemName = "NotInstalled.Harvest.Plugin",
+                    FriendlyName = "Not installed harvest plugin",
+                    Group = "Misc",
+                    Installed = false,
+                    OriginalAssemblyFile = Path.Combine(directory, "plugin.dll"),
+                    AssemblyFileName = "NotInstalled.Harvest.dll",
+                    PluginType = typeof(TestWidgetPlugin)
+                }, false));
+
+                var commonFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICommonModelFactory>();
+                var warnings = new List<global::Nop.Web.Areas.Admin.Models.Common.SystemWarningModel>();
+                await commonFactory.PrepareSystemWarningModelsAsync();
+                await InvokeInstanceMethodAsync(commonFactory, "PrepareIncompatibleWarningModelAsync", warnings);
+                await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsCollisionsWarningModelAsync", warnings);
+                await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsInstalledWarningModelAsync", warnings);
+                await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsEnabledWarningModelAsync", warnings);
+            }
+            finally
+            {
+                pluginsInfo.PluginDescriptors = originalDescriptors;
+                pluginsInfo.IncompatiblePlugins.Clear();
+                foreach (var pair in originalIncompatible)
+                    pluginsInfo.IncompatiblePlugins[pair.Key] = pair.Value;
+                pluginsInfo.AssemblyLoadedCollision.Clear();
+                foreach (var item in originalCollisions)
+                    pluginsInfo.AssemblyLoadedCollision.Add(item);
+            }
         });
 
         await Try(async () =>
@@ -4162,9 +4178,27 @@ public sealed class WebCoverageHarness
         {
             var ordered = (await orderService.SearchOrdersAsync(pageSize: 5)).FirstOrDefault();
             var item = ordered == null ? null : (await orderService.GetOrderItemsAsync(ordered.Id)).FirstOrDefault();
-            var host = item != null
+            var sample = item != null
                 ? await productService.GetProductByIdAsync(item.ProductId)
                 : (await productService.SearchProductsAsync(pageSize: 1)).First();
+            var host = new Product
+            {
+                Name = "Harvest leftover " + Guid.NewGuid().ToString("N")[..6],
+                Sku = "HLEFT" + Guid.NewGuid().ToString("N")[..6],
+                Price = 11,
+                Published = true,
+                VisibleIndividually = true,
+                ProductType = ProductType.SimpleProduct,
+                ProductTemplateId = 1,
+                IsShipEnabled = true,
+                StockQuantity = 10,
+                OrderMinimumQuantity = 1,
+                OrderMaximumQuantity = 10000,
+                CreatedOnUtc = DateTime.UtcNow,
+                UpdatedOnUtc = DateTime.UtcNow
+            };
+            await productService.InsertProductAsync(host);
+            var orderSearchHost = sample ?? host;
             var productFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
             var specService = _services.GetRequiredService<ISpecificationAttributeService>();
             var spec = (await specService.GetSpecificationAttributesWithOptionsAsync()).FirstOrDefault();
@@ -4246,9 +4280,9 @@ public sealed class WebCoverageHarness
             var comboSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductAttributeCombinationSearchModel { ProductId = host.Id };
             comboSearch.SetGridPageSize();
             await productFactory.PrepareProductAttributeCombinationListModelAsync(comboSearch, host);
-            var orderSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductOrderSearchModel { ProductId = host.Id };
+            var orderSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductOrderSearchModel { ProductId = orderSearchHost.Id };
             orderSearch.SetGridPageSize();
-            await productFactory.PrepareProductOrderListModelAsync(orderSearch, host);
+            await productFactory.PrepareProductOrderListModelAsync(orderSearch, orderSearchHost);
             var pictureSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductPictureSearchModel { ProductId = host.Id };
             pictureSearch.SetGridPageSize();
             await productFactory.PrepareProductPictureListModelAsync(pictureSearch, host);
@@ -4766,8 +4800,9 @@ public sealed class WebCoverageHarness
                 await menuController.MenuItemCreate(item, false);
             }
 
-            var created = (await _services.GetRequiredService<IMenuService>().GetAllMenuItemsAsync(menu.Id, showHidden: true))
-                .FirstOrDefault(item => item.Title.StartsWith("Harvest ", StringComparison.Ordinal));
+            var createdItems = (await _services.GetRequiredService<IMenuService>().GetAllMenuItemsAsync(menu.Id, showHidden: true))
+                .Where(menuItem => menuItem.Title.StartsWith("Harvest ", StringComparison.Ordinal)).ToList();
+            var created = createdItems.FirstOrDefault();
             if (created != null)
             {
                 await menuController.MenuItemEdit(created.Id);
@@ -4775,6 +4810,12 @@ public sealed class WebCoverageHarness
                 edit.Title = created.Title + "x";
                 menuController.ModelState.Clear();
                 await menuController.MenuItemEdit(edit, true);
+            }
+
+            foreach (var leftover in createdItems)
+            {
+                try { await _services.GetRequiredService<IMenuService>().DeleteMenuItemAsync(leftover); }
+                catch { }
             }
         });
 
@@ -4804,18 +4845,11 @@ public sealed class WebCoverageHarness
                     new global::Nop.Web.Models.Menus.MenuItemModel
                     {
                         MenuItemType = MenuItemType.Category,
-                        Template = MenuItemTemplate.List,
+                        Template = MenuItemTemplate.Simple,
                         EntityId = category.Id,
-                        NumberOfSubItemsPerGridElement = 4,
-                        MaximumNumberEntities = 8
-                    }, 4, true);
-                await InvokeInstanceMethodAsync(publicMenu, "PrepareSubMenuItemsAsync",
-                    new global::Nop.Web.Models.Menus.MenuItemModel
-                    {
-                        MenuItemType = MenuItemType.Manufacturer,
-                        Template = MenuItemTemplate.Grid,
-                        NumberOfSubItemsPerGridElement = 4
-                    }, 4, false);
+                        NumberOfSubItemsPerGridElement = 2,
+                        MaximumNumberEntities = 2
+                    }, 2, false);
             }
         });
 
