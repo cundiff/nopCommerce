@@ -72,6 +72,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         await harness.EnsureSecondStoreAsync();
         await harness.EnsurePlainProductInCartAsync();
         await harness.SeedCoverageAttributesAsync();
+        harness.EnsurePluginDescriptorsWritable();
     }
 
     [Test]
@@ -2634,6 +2635,14 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     {
         var harness = CreateHarness();
         await harness.ExerciseCoverageTailsAsync();
+        harness.TypesCreated.Should().BeGreaterThan(0);
+    }
+
+    [Test]
+    public async Task ExerciseCoverageHarvest()
+    {
+        var harness = CreateHarness();
+        await harness.ExerciseCoverageHarvestAsync();
         harness.TypesCreated.Should().BeGreaterThan(0);
     }
 
