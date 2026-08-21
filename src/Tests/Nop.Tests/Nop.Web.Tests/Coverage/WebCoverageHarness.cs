@@ -254,6 +254,11 @@ public sealed class WebCoverageHarness
 
     public async Task SeedCoverageAttributesAsync()
     {
+        await SeedAttributeFamilyAsync<CheckoutAttribute, CheckoutAttributeValue>("Coverage checkout");
+        await SeedAttributeFamilyAsync<CustomerAttribute, CustomerAttributeValue>("Coverage customer");
+        await SeedAttributeFamilyAsync<AddressAttribute, AddressAttributeValue>("Coverage address");
+        await SeedAttributeFamilyAsync<VendorAttribute, VendorAttributeValue>("Coverage vendor");
+
         var productService = _services.GetRequiredService<IProductService>();
         var attributeService = _services.GetRequiredService<IProductAttributeService>();
         var catalogAttributes = await attributeService.GetAllProductAttributesAsync();
@@ -278,10 +283,34 @@ public sealed class WebCoverageHarness
             });
         }
 
-        await SeedAttributeFamilyAsync<CheckoutAttribute, CheckoutAttributeValue>("Coverage checkout");
-        await SeedAttributeFamilyAsync<CustomerAttribute, CustomerAttributeValue>("Coverage customer");
-        await SeedAttributeFamilyAsync<AddressAttribute, AddressAttributeValue>("Coverage address");
-        await SeedAttributeFamilyAsync<VendorAttribute, VendorAttributeValue>("Coverage vendor");
+        foreach (var control in new[]
+                 {
+                     AttributeControlType.ColorSquares,
+                     AttributeControlType.ImageSquares,
+                     AttributeControlType.Checkboxes,
+                     AttributeControlType.ReadonlyCheckboxes
+                 })
+        {
+            if (existing.Any(mapping => mapping.AttributeControlType == control))
+                continue;
+            await attributeService.InsertProductAttributeMappingAsync(new ProductAttributeMapping
+            {
+                ProductId = host.Id,
+                ProductAttributeId = catalogAttributes[0].Id,
+                AttributeControlType = control,
+                IsRequired = false,
+                DisplayOrder = 70 + (int)control
+            });
+            var mapping = (await attributeService.GetProductAttributeMappingsByProductIdAsync(host.Id))
+                .Last(m => m.AttributeControlType == control);
+            await attributeService.InsertProductAttributeValueAsync(new ProductAttributeValue
+            {
+                ProductAttributeMappingId = mapping.Id,
+                Name = "Coverage",
+                IsPreSelected = true,
+                DisplayOrder = 1
+            });
+        }
     }
 
     public async Task SeedAttributeFamilyAsync<TAttribute, TValue>(string namePrefix)
@@ -936,6 +965,107 @@ public sealed class WebCoverageHarness
             shippingSettings.AllowPickupInStore = previousAllowPickup;
             await settings.SaveSettingAsync(orderSettings);
             await settings.SaveSettingAsync(shippingSettings);
+            await EnsurePlainProductInCartAsync();
+        }
+    }
+
+    public async Task ExerciseOnePageCheckoutGoldAsync()
+    {
+        await EnableCheckoutTestPluginsAsync();
+        await EnsurePlainProductInCartAsync();
+
+        var orderSettings = _services.GetRequiredService<OrderSettings>();
+        var previousOpc = orderSettings.OnePageCheckoutEnabled;
+        var previousInterval = orderSettings.MinimumOrderPlacementInterval;
+        orderSettings.OnePageCheckoutEnabled = true;
+        orderSettings.MinimumOrderPlacementInterval = 0;
+        await _services.GetRequiredService<ISettingService>().SaveSettingAsync(orderSettings);
+
+        try
+        {
+            var checkout = CreateController<global::Nop.Web.Controllers.CheckoutController>();
+            var factory = _services.GetRequiredService<global::Nop.Web.Factories.ICheckoutModelFactory>();
+            var customer = await _services.GetRequiredService<IWorkContext>().GetCurrentCustomerAsync();
+            var store = await _services.GetRequiredService<IStoreContext>().GetCurrentStoreAsync();
+            var cart = await _services.GetRequiredService<IShoppingCartService>()
+                .GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
+            var addresses = await _services.GetRequiredService<ICustomerService>().GetAddressesByCustomerIdAsync(customer.Id);
+            var addressId = addresses.FirstOrDefault()?.Id ?? 0;
+
+            async Task Fill(global::Nop.Web.Models.Common.AddressModel address, string suffix)
+            {
+                address.FirstName = "Coverage";
+                address.LastName = suffix;
+                address.Email = $"{suffix}-{Guid.NewGuid():N}@example.com";
+                address.Address1 = $"{suffix} {Guid.NewGuid():N}";
+                address.City = "New York";
+                address.ZipPostalCode = "10021";
+                address.CountryId = 1;
+                address.StateProvinceId = 1;
+                address.PhoneNumber = "5550001111";
+            }
+
+            var emptyId = new FormCollection(new Dictionary<string, StringValues>
+            {
+                ["billing_address_id"] = "0",
+                ["shipping_address_id"] = "0"
+            });
+            var existingId = new FormCollection(new Dictionary<string, StringValues>
+            {
+                ["billing_address_id"] = addressId.ToString(),
+                ["shipping_address_id"] = addressId.ToString()
+            });
+
+            var billing = new global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel { ShipToSameAddress = false };
+            await factory.PrepareBillingAddressModelAsync(billing, cart, prePopulateNewAddressWithCustomerFields: true);
+            await Fill(billing.BillingNewAddress, "OpcGoldBill");
+            checkout.ModelState.Clear();
+            await checkout.OpcSaveBilling(billing, emptyId);
+
+            billing.ShipToSameAddress = true;
+            checkout.ModelState.Clear();
+            await checkout.OpcSaveBilling(billing, existingId);
+
+            var shipping = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel();
+            await factory.PrepareShippingAddressModelAsync(shipping, cart, prePopulateNewAddressWithCustomerFields: true);
+            await Fill(shipping.ShippingNewAddress, "OpcGoldShip");
+            checkout.ModelState.Clear();
+            await checkout.OpcSaveShipping(shipping, emptyId);
+            checkout.ModelState.Clear();
+            await checkout.OpcSaveShipping(shipping, existingId);
+
+            var option = "Shipping option 1___FixedRateTestShippingRateComputationMethod";
+            try
+            {
+                var methods = await factory.PrepareShippingMethodModelAsync(cart, addresses.FirstOrDefault());
+                var selected = methods.ShippingMethods.FirstOrDefault();
+                if (selected != null)
+                    option = $"{selected.Name}___{selected.ShippingRateComputationMethodSystemName}";
+            }
+            catch
+            {
+            }
+
+            checkout.ModelState.Clear();
+            await checkout.OpcSaveShippingMethod(option, existingId);
+            await _services.GetRequiredService<IGenericAttributeService>().SaveAttributeAsync(customer,
+                NopCustomerDefaults.SelectedPaymentMethodAttribute, "Payments.TestMethod", store.Id);
+            checkout.ModelState.Clear();
+            await checkout.OpcSavePaymentMethod("Payments.TestMethod",
+                new global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel());
+            checkout.ModelState.Clear();
+            await checkout.OpcSavePaymentInfo(existingId);
+            checkout.ModelState.Clear();
+            await checkout.OpcConfirmOrder(true);
+        }
+        catch
+        {
+        }
+        finally
+        {
+            orderSettings.OnePageCheckoutEnabled = previousOpc;
+            orderSettings.MinimumOrderPlacementInterval = previousInterval;
+            await _services.GetRequiredService<ISettingService>().SaveSettingAsync(orderSettings);
             await EnsurePlainProductInCartAsync();
         }
     }

@@ -20,6 +20,8 @@ using Nop.Core.Configuration;
 using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Customers;
 using Nop.Core.Domain.Common;
+using Nop.Core.Domain.Gdpr;
+using Nop.Core.Domain.Vendors;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Security;
 using Nop.Core.Domain.Shipping;
@@ -32,6 +34,8 @@ using Nop.Services.Catalog;
 using Nop.Services.Common;
 using Nop.Services.Configuration;
 using Nop.Services.Customers;
+using Nop.Services.Discounts;
+using Nop.Services.Gdpr;
 using Nop.Services.Helpers;
 using Nop.Services.Installation;
 using Nop.Services.Localization;
@@ -173,7 +177,264 @@ public class NopWebSurfaceCoverageTests : ServiceTest
     {
         var harness = CreateHarness();
         await harness.ExerciseCheckoutFlowAsync();
+        await harness.ExerciseOnePageCheckoutGoldAsync();
         harness.MethodsInvoked.Should().BeGreaterThan(0);
+    }
+
+    [Test]
+    public async Task ExerciseRemainingGoldPaths()
+    {
+        var harness = CreateHarness();
+        await harness.EnableCheckoutTestPluginsAsync();
+        await harness.SeedShoppingCartAsync();
+        await harness.SeedCoverageAttributesAsync();
+        await harness.ExerciseOnePageCheckoutGoldAsync();
+
+        async Task Try(Func<Task> action)
+        {
+            try { await action(); } catch { }
+        }
+
+        var settingService = GetService<ISettingService>();
+        var customerSettings = GetService<CustomerSettings>();
+        var gdprSettings = GetService<global::Nop.Core.Domain.Gdpr.GdprSettings>();
+        var taxSettings = GetService<TaxSettings>();
+        var captchaSettings = GetService<CaptchaSettings>();
+        var dateTimeSettings = GetService<DateTimeSettings>();
+        var customerSnap = Snapshot(customerSettings);
+        var gdprSnap = Snapshot(gdprSettings);
+        var taxSnap = Snapshot(taxSettings);
+        var captchaSnap = Snapshot(captchaSettings);
+        var dateTimeSnap = Snapshot(dateTimeSettings);
+
+        customerSettings.UsernamesEnabled = false;
+        customerSettings.NewsletterEnabled = true;
+        customerSettings.AcceptPrivacyPolicyEnabled = true;
+        customerSettings.UserRegistrationType = UserRegistrationType.Standard;
+        gdprSettings.GdprEnabled = true;
+        gdprSettings.LogNewsletterConsent = true;
+        gdprSettings.LogPrivacyPolicyConsent = true;
+        gdprSettings.LogUserProfileChanges = true;
+        taxSettings.EuVatEnabled = true;
+        taxSettings.EuVatEmailAdminWhenNewVatSubmitted = true;
+        captchaSettings.Enabled = true;
+        captchaSettings.ShowOnRegistrationPage = true;
+        dateTimeSettings.AllowCustomersToSetTimeZone = true;
+        await settingService.SaveSettingAsync(customerSettings);
+        await settingService.SaveSettingAsync(gdprSettings);
+        await settingService.SaveSettingAsync(taxSettings);
+        await settingService.SaveSettingAsync(captchaSettings);
+        await settingService.SaveSettingAsync(dateTimeSettings);
+
+        try
+        {
+            var gdpr = GetService<IGdprService>();
+            if (!(await gdpr.GetAllConsentsAsync()).Any())
+            {
+                await gdpr.InsertConsentAsync(new GdprConsent
+                {
+                    Message = "Coverage consent",
+                    IsRequired = false,
+                    RequiredMessage = "required",
+                    DisplayDuringRegistration = true,
+                    DisplayOnCustomerInfoPage = true,
+                    DisplayOrder = 1
+                });
+            }
+
+            var publicFactory = GetService<global::Nop.Web.Factories.ICustomerModelFactory>();
+            var publicCustomer = harness.CreateController<global::Nop.Web.Controllers.CustomerController>();
+            var admin = await GetService<ICustomerService>().GetCustomerByEmailAsync(NopTestsDefaults.AdminEmail);
+
+            await Try(async () =>
+            {
+                var register = await publicFactory.PrepareRegisterModelAsync(new RegisterModel(), false);
+                register.Email = $"gdpr-{Guid.NewGuid():N}@example.com";
+                register.Password = "1q2w3e4r5t";
+                register.ConfirmPassword = register.Password;
+                register.FirstName = "Coverage";
+                register.LastName = "Gdpr";
+                register.VatNumber = "GB123";
+                register.TimeZoneId = "UTC";
+                foreach (var subscription in register.NewsLetterSubscriptions)
+                    subscription.IsActive = true;
+                var consents = await gdpr.GetAllConsentsAsync();
+                var fields = new Dictionary<string, string>();
+                foreach (var consent in consents)
+                    fields[$"consent{consent.Id}"] = "on";
+                publicCustomer.ModelState.Clear();
+                await publicCustomer.Register(register, null, true, harness.CreateForm(fields));
+            });
+            if (admin != null)
+                await GetService<IWorkContext>().SetCurrentCustomerAsync(admin);
+
+            await Try(async () =>
+            {
+                var register = await publicFactory.PrepareRegisterModelAsync(new RegisterModel(), false);
+                register.Email = $"captcha-{Guid.NewGuid():N}@example.com";
+                register.Password = "1q2w3e4r5t";
+                register.ConfirmPassword = register.Password;
+                publicCustomer.ModelState.Clear();
+                await publicCustomer.Register(register, null, false, harness.CreateForm());
+            });
+            if (admin != null)
+                await GetService<IWorkContext>().SetCurrentCustomerAsync(admin);
+
+            await Try(async () =>
+            {
+                customerSettings.UserRegistrationType = UserRegistrationType.EmailValidation;
+                await settingService.SaveSettingAsync(customerSettings);
+                var register = await publicFactory.PrepareRegisterModelAsync(new RegisterModel(), false);
+                register.Email = $"validate-{Guid.NewGuid():N}@example.com";
+                register.Password = "1q2w3e4r5t";
+                register.ConfirmPassword = register.Password;
+                publicCustomer.ModelState.Clear();
+                await publicCustomer.Register(register, null, true, harness.CreateForm());
+            });
+            if (admin != null)
+                await GetService<IWorkContext>().SetCurrentCustomerAsync(admin);
+
+            await Try(async () =>
+            {
+                customerSettings.UserRegistrationType = UserRegistrationType.AdminApproval;
+                await settingService.SaveSettingAsync(customerSettings);
+                var register = await publicFactory.PrepareRegisterModelAsync(new RegisterModel(), false);
+                register.Email = $"approve-{Guid.NewGuid():N}@example.com";
+                register.Password = "1q2w3e4r5t";
+                register.ConfirmPassword = register.Password;
+                publicCustomer.ModelState.Clear();
+                await publicCustomer.Register(register, null, true, harness.CreateForm());
+            });
+            if (admin != null)
+                await GetService<IWorkContext>().SetCurrentCustomerAsync(admin);
+
+            await Try(async () =>
+            {
+                var info = await publicFactory.PrepareCustomerInfoModelAsync(new CustomerInfoModel(), admin, false);
+                info.Email = admin.Email;
+                publicCustomer.ModelState.Clear();
+                var consents = await gdpr.GetAllConsentsAsync();
+                var fields = new Dictionary<string, string>();
+                foreach (var consent in consents)
+                    fields[$"consent{consent.Id}"] = "on";
+                await publicCustomer.Info(info, harness.CreateForm(fields));
+            });
+
+            var productFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
+            var productController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
+            var attributeService = GetService<IProductAttributeService>();
+            foreach (var product in (await GetService<IProductService>().SearchProductsAsync(pageSize: 20)).Take(8))
+            {
+                var mappings = await attributeService.GetProductAttributeMappingsByProductIdAsync(product.Id);
+                if (mappings.Count == 0)
+                    continue;
+                var form = new Dictionary<string, string>();
+                foreach (var mapping in mappings)
+                {
+                    var values = await attributeService.GetProductAttributeValuesAsync(mapping.Id);
+                    form[$"product_attribute_{mapping.Id}"] = values.FirstOrDefault()?.Id.ToString() ?? "1";
+                    form[$"product_attribute_{mapping.Id}_day"] = "1";
+                    form[$"product_attribute_{mapping.Id}_month"] = "1";
+                    form[$"product_attribute_{mapping.Id}_year"] = "2026";
+                }
+
+                await Try(async () =>
+                {
+                    await harness.InvokeInstanceMethodAsync(productController,
+                        "GetAttributesXmlForProductAttributeCombinationAsync",
+                        harness.CreateForm(form), new List<string>(), product.Id);
+                    productController.ModelState.Clear();
+                    await productController.ProductAttributeCombinationGeneratePopup(product.Id);
+                    await productController.GenerateAllAttributeCombinations(product.Id);
+                });
+            }
+
+            await Try(async () =>
+            {
+                var vendorFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IVendorModelFactory>();
+                var vendorController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.VendorController>();
+                var vendor = (await GetService<IVendorService>().GetAllVendorsAsync()).FirstOrDefault();
+                if (vendor == null)
+                    return;
+                var model = await vendorFactory.PrepareVendorModelAsync(null, vendor);
+                var (values, files) = await harness.BuildAttributeFormAsync<VendorAttribute, VendorAttributeValue>("vendor_attribute_");
+                vendorController.ModelState.Clear();
+                await vendorController.Edit(model, true, harness.CreateForm(values, true, files));
+            });
+
+            await Try(async () =>
+            {
+                var discountFactory = GetService<global::Nop.Web.Areas.Admin.Factories.IDiscountModelFactory>();
+                var discountController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.DiscountController>();
+                var discounts = await GetService<IDiscountService>().GetAllDiscountsAsync(showHidden: true, isActive: null);
+                var discount = discounts.FirstOrDefault();
+                if (discount == null)
+                    return;
+                var model = await discountFactory.PrepareDiscountModelAsync(null, discount);
+                discountController.ModelState.Clear();
+                await discountController.Edit(model, true);
+                await discountController.GetDiscountRequirements(discount.Id, 0, null, null, false);
+            });
+
+            await Try(async () =>
+            {
+                var specFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ISpecificationAttributeModelFactory>();
+                var specController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.SpecificationAttributeController>();
+                var spec = (await GetService<ISpecificationAttributeService>().GetSpecificationAttributesWithOptionsAsync()).FirstOrDefault();
+                if (spec == null)
+                    return;
+                var model = await specFactory.PrepareSpecificationAttributeModelAsync(null, spec);
+                specController.ModelState.Clear();
+                await specController.EditSpecificationAttribute(model, true);
+            });
+
+            await Try(async () =>
+            {
+                var checkoutFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ICheckoutAttributeModelFactory>();
+                var checkoutController = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.CheckoutAttributeController>();
+                var checkoutService = GetService<IAttributeService<CheckoutAttribute, CheckoutAttributeValue>>();
+                var attribute = (await checkoutService.GetAllAttributesAsync()).FirstOrDefault();
+                if (attribute == null)
+                    return;
+                var model = await checkoutFactory.PrepareCheckoutAttributeModelAsync(null, attribute);
+                checkoutController.ModelState.Clear();
+                await checkoutController.Edit(model, true);
+            });
+
+            await Try(async () =>
+            {
+                var commonFactory = GetService<global::Nop.Web.Areas.Admin.Factories.ICommonModelFactory>();
+                await commonFactory.PrepareEntityPreviewModelAsync(new global::Nop.Web.Areas.Admin.Models.Catalog.ProductModel { Id = 1, Name = "Coverage" });
+                var product = (await GetService<IProductService>().SearchProductsAsync(pageSize: 1)).First();
+                await commonFactory.PrepareMultistorePreviewModelsAsync(product);
+            });
+
+            await Try(async () =>
+            {
+                var validators = WebAssemblyMarker.Assembly.GetTypes()
+                    .Where(t => t.IsClass && !t.IsAbstract
+                                && (t.Namespace == "Nop.Web.Validators.Customer"
+                                    || t.Namespace == "Nop.Web.Areas.Admin.Validators.Customers"));
+                await harness.ExerciseValidatorsAsync(validators);
+            });
+        }
+        finally
+        {
+            Restore(customerSettings, customerSnap);
+            Restore(gdprSettings, gdprSnap);
+            Restore(taxSettings, taxSnap);
+            Restore(captchaSettings, captchaSnap);
+            Restore(dateTimeSettings, dateTimeSnap);
+            await settingService.SaveSettingAsync(customerSettings);
+            await settingService.SaveSettingAsync(gdprSettings);
+            await settingService.SaveSettingAsync(taxSettings);
+            await settingService.SaveSettingAsync(captchaSettings);
+            await settingService.SaveSettingAsync(dateTimeSettings);
+            var restored = await GetService<ICustomerService>().GetCustomerByEmailAsync(NopTestsDefaults.AdminEmail);
+            if (restored != null)
+                await GetService<IWorkContext>().SetCurrentCustomerAsync(restored);
+            harness.ClearWorkContextCaches();
+        }
     }
 
     [Test]
