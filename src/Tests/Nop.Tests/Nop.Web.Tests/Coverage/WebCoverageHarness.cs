@@ -22,12 +22,15 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Primitives;
 using Nop.Core;
+using Nop.Core.Domain.Attributes;
 using Nop.Core.Domain.Catalog;
+using Nop.Core.Domain.Common;
 using Nop.Core.Domain.Customers;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
 using Nop.Core.Domain.Shipping;
 using Nop.Core.Domain.Stores;
+using Nop.Core.Domain.Vendors;
 using Nop.Core.Events;
 using Nop.Data;
 using Nop.Services.Attributes;
@@ -275,24 +278,41 @@ public sealed class WebCoverageHarness
             });
         }
 
-        var checkoutService = _services.GetRequiredService<IAttributeService<CheckoutAttribute, CheckoutAttributeValue>>();
-        var checkoutAttributes = await checkoutService.GetAllAttributesAsync();
+        await SeedAttributeFamilyAsync<CheckoutAttribute, CheckoutAttributeValue>("Coverage checkout");
+        await SeedAttributeFamilyAsync<CustomerAttribute, CustomerAttributeValue>("Coverage customer");
+        await SeedAttributeFamilyAsync<AddressAttribute, AddressAttributeValue>("Coverage address");
+        await SeedAttributeFamilyAsync<VendorAttribute, VendorAttributeValue>("Coverage vendor");
+    }
+
+    public async Task SeedAttributeFamilyAsync<TAttribute, TValue>(string namePrefix)
+        where TAttribute : BaseAttribute, new()
+        where TValue : BaseAttributeValue, new()
+    {
+        var service = _services.GetRequiredService<IAttributeService<TAttribute, TValue>>();
+        var existing = await service.GetAllAttributesAsync();
+        foreach (var required in existing.Where(attribute => attribute.IsRequired))
+        {
+            required.IsRequired = false;
+            await service.UpdateAttributeAsync(required);
+        }
+
         foreach (AttributeControlType control in Enum.GetValues<AttributeControlType>())
         {
-            if (checkoutAttributes.Any(a => a.AttributeControlType == control))
+            if (existing.Any(attribute => attribute.AttributeControlType == control &&
+                                          (attribute.Name?.StartsWith(namePrefix, StringComparison.Ordinal) ?? false)))
                 continue;
 
-            var created = new CheckoutAttribute
+            var created = new TAttribute
             {
-                Name = $"Coverage checkout {control}",
+                Name = $"{namePrefix} {control}",
                 AttributeControlType = control,
                 IsRequired = false,
                 DisplayOrder = 80 + (int)control
             };
-            await checkoutService.InsertAttributeAsync(created);
+            await service.InsertAttributeAsync(created);
             if (created.ShouldHaveValues)
             {
-                await checkoutService.InsertAttributeValueAsync(new CheckoutAttributeValue
+                await service.InsertAttributeValueAsync(new TValue
                 {
                     AttributeId = created.Id,
                     Name = "Coverage",
@@ -301,6 +321,71 @@ public sealed class WebCoverageHarness
                 });
             }
         }
+    }
+
+    public async Task<(Dictionary<string, string> Values, List<(string name, string fileName)> Files)>
+        BuildAttributeFormAsync<TAttribute, TValue>(string prefix)
+        where TAttribute : BaseAttribute
+        where TValue : BaseAttributeValue
+    {
+        var service = _services.GetRequiredService<IAttributeService<TAttribute, TValue>>();
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var files = new List<(string name, string fileName)>();
+        foreach (var attribute in await service.GetAllAttributesAsync())
+        {
+            var controlId = $"{prefix}{attribute.Id}";
+            switch (attribute.AttributeControlType)
+            {
+                case AttributeControlType.Checkboxes:
+                case AttributeControlType.ReadonlyCheckboxes:
+                    values[controlId] = string.Join(",",
+                        (await service.GetAttributeValuesAsync(attribute.Id)).Select(value => value.Id));
+                    break;
+                case AttributeControlType.Datepicker:
+                    values[$"{controlId}_day"] = "1";
+                    values[$"{controlId}_month"] = "1";
+                    values[$"{controlId}_year"] = "2026";
+                    break;
+                case AttributeControlType.TextBox:
+                case AttributeControlType.MultilineTextbox:
+                    values[controlId] = "coverage text";
+                    break;
+                case AttributeControlType.FileUpload:
+                    files.Add((controlId, "coverage.jpg"));
+                    break;
+                default:
+                    var selected = (await service.GetAttributeValuesAsync(attribute.Id)).FirstOrDefault();
+                    if (selected != null)
+                        values[controlId] = selected.Id.ToString();
+                    break;
+            }
+        }
+
+        return (values, files);
+    }
+
+    public async Task<IFormCollection> CreateCustomerAttributeFormAsync(IDictionary<string, string> extra = null)
+    {
+        var (values, files) = await BuildAttributeFormAsync<CustomerAttribute, CustomerAttributeValue>("customer_attribute_");
+        if (extra != null)
+        {
+            foreach (var pair in extra)
+                values[pair.Key] = pair.Value;
+        }
+
+        return CreateForm(values, true, files);
+    }
+
+    public async Task<IFormCollection> CreateAddressAttributeFormAsync(IDictionary<string, string> extra = null)
+    {
+        var (values, files) = await BuildAttributeFormAsync<AddressAttribute, AddressAttributeValue>("address_attribute_");
+        if (extra != null)
+        {
+            foreach (var pair in extra)
+                values[pair.Key] = pair.Value;
+        }
+
+        return CreateForm(values, true, files);
     }
 
     public void ApplyRequestForm(IDictionary<string, string> values = null, bool withFile = true,
@@ -608,14 +693,27 @@ public sealed class WebCoverageHarness
         await SeedCoverageAttributesAsync();
 
         var orderSettings = _services.GetRequiredService<OrderSettings>();
-        orderSettings.OnePageCheckoutEnabled = true;
-        await _services.GetRequiredService<ISettingService>().SaveSettingAsync(orderSettings);
+        var shippingSettings = _services.GetRequiredService<ShippingSettings>();
+        var previousOpc = orderSettings.OnePageCheckoutEnabled;
+        var previousInterval = orderSettings.MinimumOrderPlacementInterval;
+        var previousPickupPage = orderSettings.DisplayPickupInStoreOnShippingMethodPage;
+        var previousShipToSame = shippingSettings.ShipToSameAddress;
+        var previousAllowPickup = shippingSettings.AllowPickupInStore;
+
+        orderSettings.OnePageCheckoutEnabled = false;
+        orderSettings.MinimumOrderPlacementInterval = 0;
+        orderSettings.DisplayPickupInStoreOnShippingMethodPage = true;
+        shippingSettings.ShipToSameAddress = true;
+        shippingSettings.AllowPickupInStore = true;
+        var settings = _services.GetRequiredService<ISettingService>();
+        await settings.SaveSettingAsync(orderSettings);
+        await settings.SaveSettingAsync(shippingSettings);
 
         var checkoutType = typeof(global::Nop.Web.Controllers.CheckoutController);
-        object checkout;
+        global::Nop.Web.Controllers.CheckoutController checkout;
         try
         {
-            checkout = ActivatorUtilities.CreateInstance(_services, checkoutType);
+            checkout = (global::Nop.Web.Controllers.CheckoutController)ActivatorUtilities.CreateInstance(_services, checkoutType);
             AttachMvc(checkout);
             TypesCreated++;
         }
@@ -626,18 +724,22 @@ public sealed class WebCoverageHarness
             return;
         }
 
-        var customer = await _services.GetRequiredService<IWorkContext>().GetCurrentCustomerAsync();
-        var addresses = await _services.GetRequiredService<ICustomerService>().GetAddressesByCustomerIdAsync(customer.Id);
+        var workContext = _services.GetRequiredService<IWorkContext>();
+        var customerService = _services.GetRequiredService<ICustomerService>();
+        var cartService = _services.GetRequiredService<IShoppingCartService>();
+        var store = await _services.GetRequiredService<IStoreContext>().GetCurrentStoreAsync();
+        var customer = await workContext.GetCurrentCustomerAsync();
+        var addresses = await customerService.GetAddressesByCustomerIdAsync(customer.Id);
         var addressId = addresses.FirstOrDefault()?.Id ?? GetEntityIds("Address").FirstOrDefault();
-
-        var formValues = new Dictionary<string, StringValues>();
-        if (addressId > 0)
-        {
-            formValues["billing_address_id"] = addressId.ToString();
-            formValues["shipping_address_id"] = addressId.ToString();
-        }
-
-        var form = new FormCollection(formValues);
+        var checkoutFactory = _services.GetRequiredService<global::Nop.Web.Factories.ICheckoutModelFactory>();
+        var addressForm = await CreateAddressAttributeFormAsync(addressId > 0
+            ? new Dictionary<string, string>
+            {
+                ["billing_address_id"] = addressId.ToString(),
+                ["shipping_address_id"] = addressId.ToString(),
+                ["nextstep"] = "next"
+            }
+            : new Dictionary<string, string> { ["nextstep"] = "next" });
 
         async Task Call(string name, params object[] args)
         {
@@ -645,6 +747,7 @@ public sealed class WebCoverageHarness
                 .FirstOrDefault(m => m.Name == name && m.GetParameters().Length == args.Length);
             if (method == null)
                 return;
+            checkout.ModelState.Clear();
             var (ok, _) = await TryInvokeAsync(checkout, method, args, RoundTripTimeout);
             if (ok)
                 MethodsInvoked++;
@@ -652,75 +755,189 @@ public sealed class WebCoverageHarness
                 MethodsFailed++;
         }
 
-        await Call("Index");
-        await Call("OnePageCheckout");
-        await Call("BillingAddress", form);
-        if (addressId > 0)
-            await Call("SelectBillingAddress", addressId, true);
+        async Task<IList<ShoppingCartItem>> Cart()
+            => await cartService.GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
 
-        var billingModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel), "model", checkoutType);
-        await Call("OpcSaveBilling", billingModel, form);
-        await Call("NewBillingAddress", billingModel, form);
-        await Call("SaveEditBillingAddress", billingModel, form, true);
-
-        await Call("ShippingAddress");
-        if (addressId > 0)
-            await Call("SelectShippingAddress", addressId);
-
-        var shippingModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel), "model", checkoutType);
-        await Call("OpcSaveShipping", shippingModel, form);
-        await Call("NewShippingAddress", shippingModel, form);
-        await Call("SaveEditShippingAddress", shippingModel, form, true);
-
-        var shippingOption = "Shipping option 1___FixedRateTestShippingRateComputationMethod";
-        try
+        async Task FillNewAddress(global::Nop.Web.Models.Common.AddressModel address, string suffix)
         {
-            var checkoutFactory = _services.GetRequiredService<global::Nop.Web.Factories.ICheckoutModelFactory>();
-            var address = await _services.GetRequiredService<ICustomerService>().GetCustomerShippingAddressAsync(customer)
-                          ?? addresses.FirstOrDefault();
-            var cart = await _services.GetRequiredService<IShoppingCartService>()
-                .GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart,
-                    (await _services.GetRequiredService<IStoreContext>().GetCurrentStoreAsync()).Id);
-            var shippingMethods = await checkoutFactory.PrepareShippingMethodModelAsync(cart, address);
-            var selected = shippingMethods?.ShippingMethods?.FirstOrDefault();
-            if (selected != null)
-                shippingOption = $"{selected.Name}___{selected.ShippingRateComputationMethodSystemName}";
-        }
-        catch
-        {
-            // keep the test plugin option string
+            address.FirstName = "Coverage";
+            address.LastName = suffix;
+            address.Email = $"{suffix}-{Guid.NewGuid():N}@example.com";
+            address.Address1 = $"Coverage {suffix} {Guid.NewGuid():N}";
+            address.Address2 = "Suite 2";
+            address.City = "New York";
+            address.ZipPostalCode = "10021";
+            address.County = "New York";
+            address.CountryId = 1;
+            address.StateProvinceId = 1;
+            address.PhoneNumber = "5550001111";
+            address.FaxNumber = "5550002222";
+            address.Company = "Coverage Co";
         }
 
-        var previousOpc = orderSettings.OnePageCheckoutEnabled;
-        orderSettings.OnePageCheckoutEnabled = false;
         try
         {
+            await Call("Index");
+            await Call("BillingAddress", addressForm);
+            if (addressId > 0)
+                await Call("SelectBillingAddress", addressId, true);
+
+            var billing = new global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel { ShipToSameAddress = true };
+            await checkoutFactory.PrepareBillingAddressModelAsync(billing, await Cart(), prePopulateNewAddressWithCustomerFields: true);
+            await FillNewAddress(billing.BillingNewAddress, "BillSame");
+            checkout.ModelState.Clear();
+            await Call("NewBillingAddress", billing, addressForm);
+
+            await EnsurePlainProductInCartAsync();
+            customer = await workContext.GetCurrentCustomerAsync();
+            billing = new global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel { ShipToSameAddress = false };
+            await checkoutFactory.PrepareBillingAddressModelAsync(billing, await Cart(), prePopulateNewAddressWithCustomerFields: true);
+            await FillNewAddress(billing.BillingNewAddress, "BillNew");
+            checkout.ModelState.Clear();
+            await Call("NewBillingAddress", billing, await CreateAddressAttributeFormAsync(new Dictionary<string, string>
+            {
+                ["billing_address_id"] = "0",
+                ["nextstep"] = "next"
+            }));
+
+            await Call("ShippingAddress");
+            if (addressId > 0)
+                await Call("SelectShippingAddress", addressId);
+
+            var shipping = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel();
+            await checkoutFactory.PrepareShippingAddressModelAsync(shipping, await Cart(), prePopulateNewAddressWithCustomerFields: true);
+            await FillNewAddress(shipping.ShippingNewAddress, "ShipNew");
+            checkout.ModelState.Clear();
+            await Call("NewShippingAddress", shipping, await CreateAddressAttributeFormAsync(new Dictionary<string, string>
+            {
+                ["shipping_address_id"] = "0",
+                ["nextstep"] = "next",
+                ["PickupInStore"] = "false"
+            }));
+
+            var pickupForm = await CreateAddressAttributeFormAsync(new Dictionary<string, string>
+            {
+                ["PickupInStore"] = "true",
+                ["pickup-points-id"] = "pickup1___FixedRateTestShippingRateComputationMethod",
+                ["nextstep"] = "next"
+            });
+            shipping = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel();
+            await checkoutFactory.PrepareShippingAddressModelAsync(shipping, await Cart(), prePopulateNewAddressWithCustomerFields: true);
+            await FillNewAddress(shipping.ShippingNewAddress, "ShipPickup");
+            checkout.ModelState.Clear();
+            await Call("NewShippingAddress", shipping, pickupForm);
+
+            var shippingOption = "Shipping option 1___FixedRateTestShippingRateComputationMethod";
+            try
+            {
+                var address = await customerService.GetCustomerShippingAddressAsync(customer) ?? addresses.FirstOrDefault();
+                var shippingMethods = await checkoutFactory.PrepareShippingMethodModelAsync(await Cart(), address);
+                var selected = shippingMethods?.ShippingMethods?.FirstOrDefault();
+                if (selected != null)
+                    shippingOption = $"{selected.Name}___{selected.ShippingRateComputationMethodSystemName}";
+            }
+            catch
+            {
+            }
+
             await Call("ShippingMethod");
-            await Call("SelectShippingMethod", shippingOption, form);
+            await Call("SelectShippingMethod", shippingOption, addressForm);
+            await Call("SelectShippingMethod", shippingOption, pickupForm);
             await Call("PaymentMethod");
-            var paymentModel = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel), "model", checkoutType);
+            var paymentModel = new global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel();
             await Call("SelectPaymentMethod", "Payments.TestMethod", paymentModel);
+            await _services.GetRequiredService<IGenericAttributeService>().SaveAttributeAsync(customer,
+                NopCustomerDefaults.SelectedPaymentMethodAttribute, "Payments.TestMethod", store.Id);
             await Call("PaymentInfo");
-            await Call("EnterPaymentInfo", form);
+            await Call("EnterPaymentInfo", addressForm);
             await Call("Confirm");
+            await Call("ConfirmOrder", true);
+
+            await EnsurePlainProductInCartAsync();
+            customer = await workContext.GetCurrentCustomerAsync();
+
+            var extra = new Address
+            {
+                FirstName = "Delete",
+                LastName = "Me",
+                Email = $"del-{Guid.NewGuid():N}@example.com",
+                Address1 = $"Delete {Guid.NewGuid():N}",
+                City = "New York",
+                ZipPostalCode = "10021",
+                CountryId = 1,
+                CreatedOnUtc = DateTime.UtcNow
+            };
+            var addressService = _services.GetRequiredService<IAddressService>();
+            await addressService.InsertAddressAsync(extra);
+            await customerService.InsertCustomerAddressAsync(customer, extra);
+            await Call("DeleteEditBillingAddress", extra.Id, false);
+            extra = new Address
+            {
+                FirstName = "Delete",
+                LastName = "Ship",
+                Email = $"del-ship-{Guid.NewGuid():N}@example.com",
+                Address1 = $"DeleteShip {Guid.NewGuid():N}",
+                City = "New York",
+                ZipPostalCode = "10021",
+                CountryId = 1,
+                CreatedOnUtc = DateTime.UtcNow
+            };
+            await addressService.InsertAddressAsync(extra);
+            await customerService.InsertCustomerAddressAsync(customer, extra);
+            await Call("DeleteEditShippingAddress", extra.Id, true);
+
+            orderSettings.OnePageCheckoutEnabled = true;
+            await settings.SaveSettingAsync(orderSettings);
+            await EnsurePlainProductInCartAsync();
+            customer = await workContext.GetCurrentCustomerAsync();
+            addresses = await customerService.GetAddressesByCustomerIdAsync(customer.Id);
+            addressId = addresses.FirstOrDefault()?.Id ?? addressId;
+
+            await Call("OnePageCheckout");
+            var opcBilling = new global::Nop.Web.Models.Checkout.CheckoutBillingAddressModel { ShipToSameAddress = true };
+            await checkoutFactory.PrepareBillingAddressModelAsync(opcBilling, await Cart(), prePopulateNewAddressWithCustomerFields: true);
+            await Call("OpcSaveBilling", opcBilling, await CreateAddressAttributeFormAsync(new Dictionary<string, string>
+            {
+                ["billing_address_id"] = addressId.ToString()
+            }));
+            await FillNewAddress(opcBilling.BillingNewAddress, "OpcBill");
+            opcBilling.ShipToSameAddress = false;
+            await Call("OpcSaveBilling", opcBilling, await CreateAddressAttributeFormAsync(new Dictionary<string, string>
+            {
+                ["billing_address_id"] = "0"
+            }));
+
+            var opcShipping = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel();
+            await checkoutFactory.PrepareShippingAddressModelAsync(opcShipping, await Cart(), prePopulateNewAddressWithCustomerFields: true);
+            await Call("OpcSaveShipping", opcShipping, await CreateAddressAttributeFormAsync(new Dictionary<string, string>
+            {
+                ["shipping_address_id"] = addressId.ToString()
+            }));
+            await FillNewAddress(opcShipping.ShippingNewAddress, "OpcShip");
+            await Call("OpcSaveShipping", opcShipping, await CreateAddressAttributeFormAsync(new Dictionary<string, string>
+            {
+                ["shipping_address_id"] = "0"
+            }));
+
+            await Call("OpcSaveShippingMethod", shippingOption, addressForm);
+            await Call("OpcSavePaymentMethod", "Payments.TestMethod", paymentModel);
+            await Call("OpcSavePaymentInfo", addressForm);
+            await Call("OpcConfirmOrder", true);
+            await Call("Completed", (int?)null);
+            await Call("GetAddressById", addressId);
+            await Call("OpcCompleteRedirectionPayment");
         }
         finally
         {
             orderSettings.OnePageCheckoutEnabled = previousOpc;
+            orderSettings.MinimumOrderPlacementInterval = previousInterval;
+            orderSettings.DisplayPickupInStoreOnShippingMethodPage = previousPickupPage;
+            shippingSettings.ShipToSameAddress = previousShipToSame;
+            shippingSettings.AllowPickupInStore = previousAllowPickup;
+            await settings.SaveSettingAsync(orderSettings);
+            await settings.SaveSettingAsync(shippingSettings);
+            await EnsurePlainProductInCartAsync();
         }
-
-        await Call("OpcSaveShippingMethod", shippingOption, form);
-        await Call("PaymentMethod");
-        var opcPayment = CreateArg(typeof(global::Nop.Web.Models.Checkout.CheckoutPaymentMethodModel), "model", checkoutType);
-        await Call("SelectPaymentMethod", "Payments.TestMethod", opcPayment);
-        await Call("OpcSavePaymentMethod", "Payments.TestMethod", opcPayment);
-        await Call("PaymentInfo");
-        await Call("EnterPaymentInfo", form);
-        await Call("OpcSavePaymentInfo", form);
-        await Call("Confirm");
-        await Call("Completed", (int?)null);
-        await Call("GetAddressById", addressId);
-        await Call("OpcCompleteRedirectionPayment");
     }
 
     private async Task InvokeMethodAsync(object instance, MethodInfo method, bool boolOverrides, bool nullEntities, BaseEntity extraEntity)
@@ -762,6 +979,123 @@ public sealed class WebCoverageHarness
         {
             if (instance is Controller controller)
                 controller.ModelState.Clear();
+        }
+    }
+
+    public void ExerciseBulkEditDataHelpers()
+    {
+        var nested = typeof(global::Nop.Web.Areas.Admin.Controllers.ProductController)
+            .GetNestedType("BulkEditData", BindingFlags.NonPublic | BindingFlags.Public);
+        if (nested == null)
+            return;
+
+        var create = Activator.CreateInstance(nested, 1, 0);
+        nested.GetProperty("IsSelected")?.SetValue(create, true);
+        nested.GetProperty("Name")?.SetValue(create, "Coverage bulk");
+        nested.GetProperty("Sku")?.SetValue(create, "COVBULK");
+        nested.GetProperty("Price")?.SetValue(create, 10m);
+        nested.GetProperty("OldPrice")?.SetValue(create, 12m);
+        nested.GetProperty("Quantity")?.SetValue(create, 5);
+        nested.GetProperty("IsPublished")?.SetValue(create, true);
+        nested.GetMethod("NeedToCreate")?.Invoke(create, [true]);
+        nested.GetMethod("NeedToCreate")?.Invoke(create, [false]);
+        nested.GetMethod("CreateProduct")?.Invoke(create, [true]);
+        nested.GetMethod("CreateProduct")?.Invoke(create, [false]);
+
+        var update = Activator.CreateInstance(nested, 1, 0);
+        nested.GetProperty("IsSelected")?.SetValue(update, true);
+        nested.GetProperty("Name")?.SetValue(update, "Coverage updated");
+        nested.GetProperty("Sku")?.SetValue(update, "COVUPD");
+        nested.GetProperty("Price")?.SetValue(update, 15m);
+        nested.GetProperty("OldPrice")?.SetValue(update, 20m);
+        nested.GetProperty("Quantity")?.SetValue(update, 7);
+        nested.GetProperty("IsPublished")?.SetValue(update, false);
+        nested.GetProperty("Product")?.SetValue(update, new Product
+        {
+            Name = "Original",
+            Sku = "OLD",
+            Price = 1,
+            OldPrice = 2,
+            StockQuantity = 1,
+            Published = true
+        });
+        nested.GetMethod("NeedToUpdate")?.Invoke(update, [true]);
+        nested.GetMethod("NeedToUpdate")?.Invoke(update, [false]);
+        nested.GetMethod("UpdateProduct")?.Invoke(update, [true]);
+        nested.GetMethod("UpdateProduct")?.Invoke(update, [false]);
+        MethodsInvoked += 8;
+    }
+
+    public async Task ExerciseRazorPageWithModelAsync(string typeNameFragment, object model)
+    {
+        var type = typeof(global::Nop.Web.Controllers.HomeController).Assembly.GetTypes()
+            .FirstOrDefault(candidate =>
+                candidate.IsClass && !candidate.IsAbstract
+                && candidate.GetMethod("ExecuteAsync") != null
+                && (candidate.FullName?.Contains(typeNameFragment, StringComparison.Ordinal) == true
+                    || candidate.Name.Contains(typeNameFragment, StringComparison.Ordinal)));
+        if (type == null)
+            return;
+
+        IServiceProvider previousServices = null;
+        HttpContext http = null;
+        try
+        {
+            var instance = Activator.CreateInstance(type);
+            if (instance == null)
+                return;
+
+            TypesCreated++;
+            http = _services.GetRequiredService<IHttpContextAccessor>().HttpContext
+                   ?? throw new InvalidOperationException("HttpContext is not available");
+            previousServices = http.RequestServices;
+            http.RequestServices = new CompositeServiceProvider(MvcServices.Value, _services);
+
+            AttachMvc(instance);
+            if (instance is RazorPageBase razorPage)
+            {
+                if (razorPage.ViewContext?.ViewData != null)
+                    razorPage.ViewContext.ViewData.Model = model;
+                razorPage.Layout = null;
+                razorPage.HtmlEncoder ??= HtmlEncoder.Default;
+                try
+                {
+                    MvcServices.Value.GetService<IRazorPageActivator>()
+                        ?.Activate(razorPage, razorPage.ViewContext);
+                }
+                catch
+                {
+                }
+
+                if (razorPage.ViewContext?.ViewData != null)
+                    razorPage.ViewContext.ViewData.Model = model;
+                instance.GetType().GetProperty("Model")?.SetValue(instance, model);
+                AttachRazorRuntime(razorPage);
+                ActivateRazorInjects(instance, razorPage.ViewContext);
+                razorPage.Layout = null;
+            }
+
+            var execute = type.GetMethod("ExecuteAsync", BindingFlags.Public | BindingFlags.Instance);
+            if (execute == null)
+                return;
+            var raw = execute.Invoke(instance, null);
+            if (raw is Task task)
+            {
+                var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(12)));
+                if (finished == task)
+                    await task;
+            }
+
+            MethodsInvoked++;
+        }
+        catch
+        {
+            MethodsFailed++;
+        }
+        finally
+        {
+            if (http != null && previousServices != null)
+                http.RequestServices = previousServices;
         }
     }
 
