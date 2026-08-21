@@ -11,8 +11,10 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Abstractions;
+using Microsoft.AspNetCore.Mvc.Razor;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.AspNetCore.Mvc.Routing;
+using Microsoft.AspNetCore.Mvc.ViewEngines;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Caching.Distributed;
@@ -64,6 +66,8 @@ using Nop.Services.Messages;
 using Nop.Services.Orders;
 using Nop.Services.Payments;
 using Nop.Services.Plugins;
+using Nop.Services.Plugins.Marketplace;
+using Nop.Services.Reminders;
 using Nop.Services.ScheduleTasks;
 using Nop.Services.Security;
 using Nop.Services.Seo;
@@ -78,8 +82,10 @@ using Nop.Services.Vendors;
 using Nop.Tests.Nop.Services.Tests.ScheduleTasks;
 using Nop.Tests.Nop.Web.Tests.Public.Factories;
 using Nop.Web.Areas.Admin.Factories;
+using Nop.Web.Areas.Admin.Helpers;
 using Nop.Web.Framework;
 using Nop.Web.Framework.Factories;
+using Nop.Web.Framework.Menu;
 using Nop.Web.Framework.Infrastructure.Extensions;
 using Nop.Web.Framework.Mvc.Routing;
 using Nop.Web.Framework.Security.Captcha;
@@ -186,6 +192,14 @@ public partial class BaseNopTest
         var htmlHelper = new Mock<IHtmlHelper>();
         services.AddSingleton(htmlHelper.Object);
 
+        var coverageView = new Mock<IView>();
+        coverageView.Setup(v => v.RenderAsync(It.IsAny<ViewContext>())).Returns(Task.CompletedTask);
+        var foundView = ViewEngineResult.Found("coverage", coverageView.Object);
+        var razorViewEngine = new Mock<IRazorViewEngine>();
+        razorViewEngine.Setup(e => e.FindView(It.IsAny<ActionContext>(), It.IsAny<string>(), It.IsAny<bool>())).Returns(foundView);
+        razorViewEngine.Setup(e => e.GetView(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>())).Returns(foundView);
+        services.AddSingleton<IRazorViewEngine>(razorViewEngine.Object);
+
         //file provider
         services.AddTransient<INopFileProvider, NopFileProvider>();
         CommonHelper.DefaultFileProvider = new NopFileProvider(webHostEnvironment.Object);
@@ -277,6 +291,7 @@ public partial class BaseNopTest
 
         //plugins
         services.AddTransient<IPluginService, PluginService>();
+        services.AddTransient<OfficialFeedManager>();
 
         services.AddScoped<IShortTermCacheManager, PerRequestCacheManager>();
 
@@ -394,6 +409,8 @@ public partial class BaseNopTest
         services.AddTransient<ITopicService, TopicService>();
         services.AddTransient<IDateTimeHelper, DateTimeHelper>();
         services.AddTransient<IScheduleTaskService, ScheduleTaskService>();
+        services.AddTransient<IReminderService, ReminderService>();
+        services.AddTransient<IAdminMenu, AdminMenu>();
         services.AddTransient<IExportManager, ExportManager>();
         services.AddTransient<IImportManager, ImportManager>();
         services.AddTransient<IPdfService, PdfService>();
@@ -506,6 +523,16 @@ public partial class BaseNopTest
         services.AddTransient<IExternalAuthenticationMethodModelFactory, ExternalAuthenticationMethodModelFactory>();
         services.AddTransient<IGiftCardModelFactory, GiftCardModelFactory>();
         services.AddTransient<IHomeModelFactory, HomeModelFactory>();
+        services.AddTransient<IAddressModelFactory, AddressModelFactory>();
+        services.AddTransient<IFilterLevelValueModelFactory, FilterLevelValueModelFactory>();
+        services.AddTransient<IMultiFactorAuthenticationMethodModelFactory, MultiFactorAuthenticationMethodModelFactory>();
+        services.AddTransient<INewsLetterSubscriptionModelFactory, NewsLetterSubscriptionModelFactory>();
+        services.AddTransient<INewsLetterSubscriptionTypeModelFactory, NewsLetterSubscriptionTypeModelFactory>();
+        services.AddTransient<IMenuModelFactory, MenuModelFactory>();
+        services.AddTransient<IReminderModelFactory, ReminderModelFactory>();
+        services.AddTransient<global::Nop.Web.Areas.Admin.Factories.IWidgetModelFactory, global::Nop.Web.Areas.Admin.Factories.WidgetModelFactory>();
+        services.AddTransient<ISummernoteHelper, SummernoteHelper>();
+        services.AddSingleton(Options.Create(new MvcNewtonsoftJsonOptions()));
         services.AddTransient<ILanguageModelFactory, LanguageModelFactory>();
         services.AddTransient<ILogModelFactory, LogModelFactory>();
         services.AddTransient<IManufacturerModelFactory, ManufacturerModelFactory>();
@@ -558,8 +585,11 @@ public partial class BaseNopTest
         services.AddTransient<Web.Factories.ISitemapModelFactory, Web.Factories.SitemapModelFactory>();
         services.AddTransient<Web.Factories.ITopicModelFactory, Web.Factories.TopicModelFactory>();
         services.AddTransient<Web.Factories.IVendorModelFactory, Web.Factories.VendorModelFactory>();
+        services.AddTransient<Web.Factories.IFilterLevelValueModelFactory, Web.Factories.FilterLevelValueModelFactory>();
+        services.AddTransient<Web.Factories.IMenuModelFactory, Web.Factories.MenuModelFactory>();
 
         _serviceProvider = services.BuildServiceProvider();
+        httpContext.RequestServices = _serviceProvider;
 
         EngineContext.Replace(new NopTestEngine(_serviceProvider));
 

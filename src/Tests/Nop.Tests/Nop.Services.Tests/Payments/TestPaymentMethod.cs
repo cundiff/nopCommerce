@@ -205,7 +205,7 @@ public class TestPaymentMethod : BasePlugin, IPaymentMethod
     /// <summary>
     /// Gets a value indicating whether we should display a payment information page for this plugin
     /// </summary>
-    public bool SkipPaymentInfo => false;
+    public bool SkipPaymentInfo => TestSkipPaymentInfo;
 
     /// <summary>
     /// Gets a payment method description that will be displayed on checkout pages in the public store
@@ -229,6 +229,8 @@ public class TestPaymentMethod : BasePlugin, IPaymentMethod
     public static bool TestSupportVoid { get; set; } = false;
 
     public static decimal AdditionalHandlingFee { get; set; } = decimal.Zero;
+
+    public static bool TestSkipPaymentInfo { get; set; }
 
     #endregion
 
