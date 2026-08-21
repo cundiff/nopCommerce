@@ -220,6 +220,7 @@ public class NopWebSurfaceCoverageTests : ServiceTest
         var taxSettings = GetService<TaxSettings>();
         var captchaSettings = GetService<CaptchaSettings>();
         var dateTimeSettings = GetService<DateTimeSettings>();
+        var vendorSettings = GetService<global::Nop.Core.Domain.Vendors.VendorSettings>();
         var customerSnap = Snapshot(customerSettings);
         var gdprSnap = Snapshot(gdprSettings);
         var taxSnap = Snapshot(taxSettings);
@@ -418,6 +419,38 @@ public class NopWebSurfaceCoverageTests : ServiceTest
                 var model = await checkoutFactory.PrepareCheckoutAttributeModelAsync(null, attribute);
                 checkoutController.ModelState.Clear();
                 await checkoutController.Edit(model, true);
+            });
+
+            await Try(async () =>
+            {
+                var vendor = (await GetService<IVendorService>().GetAllVendorsAsync()).FirstOrDefault();
+                if (vendor == null)
+                    return;
+                var previousVendorId = admin.VendorId;
+                var previousMax = vendorSettings.MaximumProductNumber;
+                try
+                {
+                    admin.VendorId = vendor.Id;
+                    await GetService<ICustomerService>().UpdateCustomerAsync(admin);
+                    harness.ClearWorkContextCaches();
+                    vendorSettings.MaximumProductNumber = 1;
+                    await settingService.SaveSettingAsync(vendorSettings);
+                    var vendorProduct = harness.CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
+                    var createModel = await productFactory.PrepareProductModelAsync(null, null);
+                    createModel.Name = "Vendor limit " + Guid.NewGuid().ToString("N")[..8];
+                    vendorProduct.ModelState.Clear();
+                    await vendorProduct.Create(createModel, false);
+                    vendorProduct.ModelState.AddModelError("coverage", "invalid");
+                    await vendorProduct.Create(createModel, true);
+                }
+                finally
+                {
+                    admin.VendorId = previousVendorId;
+                    await GetService<ICustomerService>().UpdateCustomerAsync(admin);
+                    vendorSettings.MaximumProductNumber = previousMax;
+                    await settingService.SaveSettingAsync(vendorSettings);
+                    harness.ClearWorkContextCaches();
+                }
             });
 
             await Try(async () =>
@@ -2534,6 +2567,25 @@ public class NopWebSurfaceCoverageTests : ServiceTest
             if (values.TryGetValue(prop.Name, out var value))
                 prop.SetValue(settings, value);
         }
+    }
+
+    [Test]
+    public async Task ExerciseSkippedSafeControllerInvokes()
+    {
+        var harness = CreateHarness();
+        var types = WebAssemblyMarker.Assembly.GetTypes()
+            .Where(t => t.IsClass && !t.IsAbstract && typeof(Controller).IsAssignableFrom(t)
+                        && t.Name is not "ElFinderController" and not "InstallController");
+        await harness.ExerciseSkippedSafeInvokesAsync(types);
+        harness.MethodsInvoked.Should().BeGreaterThan(0);
+    }
+
+    [Test]
+    public async Task ExerciseRemainingVolume()
+    {
+        var harness = CreateHarness();
+        await harness.ExerciseRemainingVolumeAsync();
+        harness.TypesCreated.Should().BeGreaterThan(0);
     }
 
     [Test]
