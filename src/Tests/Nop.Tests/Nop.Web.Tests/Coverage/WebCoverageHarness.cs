@@ -31,7 +31,9 @@ using Nop.Core.Domain.Blogs;
 using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Common;
 using Nop.Core.Domain.Customers;
+using Nop.Core.Domain.Directory;
 using Nop.Core.Domain.Discounts;
+using Nop.Core.Domain.FilterLevels;
 using Nop.Core.Domain.Gdpr;
 using Nop.Core.Domain.Media;
 using Nop.Core.Domain.Messages;
@@ -52,6 +54,7 @@ using Nop.Services.Configuration;
 using Nop.Services.Customers;
 using Nop.Services.Directory;
 using Nop.Services.Discounts;
+using Nop.Services.FilterLevels;
 using Nop.Services.Gdpr;
 using Nop.Services.Localization;
 using Nop.Services.Media;
@@ -2734,26 +2737,43 @@ public sealed class WebCoverageHarness
                 await pluginController.List(false);
                 var search = new global::Nop.Web.Areas.Admin.Models.Plugins.PluginSearchModel();
                 search.SetGridPageSize();
-                await pluginController.ListSelect(search);
-                await pluginController.AdminNavigationPlugins();
-                await pluginController.UploadPluginsAndThemes(null);
-                await pluginController.Install(CreateForm(new Dictionary<string, string>
+                try { await pluginController.ListSelect(search); } catch { }
+                try { await pluginController.AdminNavigationPlugins(); } catch { }
+                try { await pluginController.UploadPluginsAndThemes(null); } catch { }
+                try { await pluginController.UploadPluginsAndThemes(CreateFormFile("archivefile", "plugins.zip")); } catch { }
+                try
                 {
-                    ["install-plugin-link-Payments.TestMethod"] = "1"
-                }));
-                await pluginController.Install(CreateForm(new Dictionary<string, string>
+                    await pluginController.Install(CreateForm(new Dictionary<string, string>
+                    {
+                        ["install-plugin-link-Payments.TestMethod"] = "1"
+                    }));
+                }
+                catch { }
+                try
                 {
-                    ["install-plugin-link-DoesNotExist"] = "1"
-                }));
-                await pluginController.Uninstall(CreateForm(new Dictionary<string, string>
+                    await pluginController.Install(CreateForm(new Dictionary<string, string>
+                    {
+                        ["install-plugin-link-DoesNotExist"] = "1"
+                    }));
+                }
+                catch { }
+                try
                 {
-                    ["uninstall-plugin-link-DoesNotExist"] = "1"
-                }));
-                await pluginController.Delete(CreateForm(new Dictionary<string, string>
+                    await pluginController.Uninstall(CreateForm(new Dictionary<string, string>
+                    {
+                        ["uninstall-plugin-link-DoesNotExist"] = "1"
+                    }));
+                }
+                catch { }
+                try
                 {
-                    ["delete-plugin-link-DoesNotExist"] = "1"
-                }));
-                pluginController.DiscardChanges();
+                    await pluginController.Delete(CreateForm(new Dictionary<string, string>
+                    {
+                        ["delete-plugin-link-DoesNotExist"] = "1"
+                    }));
+                }
+                catch { }
+                try { pluginController.DiscardChanges(); } catch { }
 
                 var stores = await _services.GetRequiredService<IStoreService>().GetAllStoresAsync();
                 var role = await customerService.GetCustomerRoleBySystemNameAsync(NopCustomerDefaults.RegisteredRoleName);
@@ -2764,9 +2784,13 @@ public sealed class WebCoverageHarness
                         await pluginController.EditPopup(descriptor.SystemName);
                         var model = await pluginFactory.PreparePluginModelAsync(null, descriptor);
                         model.FriendlyName = descriptor.FriendlyName + " cov";
-                        model.SelectedStoreIds = stores.Select(item => item.Id).Take(2).ToList();
-                        if (role != null)
-                            model.SelectedCustomerRoleIds = [role.Id];
+                        model.SelectedStoreIds ??= [];
+                        model.SelectedStoreIds.Clear();
+                        foreach (var id in stores.Select(item => item.Id).DefaultIfEmpty(1))
+                            model.SelectedStoreIds.Add(id);
+                        model.SelectedCustomerRoleIds ??= [];
+                        model.SelectedCustomerRoleIds.Clear();
+                        model.SelectedCustomerRoleIds.Add(role?.Id ?? 1);
                         model.IsEnabled = true;
                         pluginController.ModelState.Clear();
                         await pluginController.EditPopup(model);
@@ -2928,10 +2952,12 @@ public sealed class WebCoverageHarness
                 var productFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
                 var productController = CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
                 var vendor = (await _services.GetRequiredService<IVendorService>().GetAllVendorsAsync()).FirstOrDefault();
-                var host = (await productService.SearchProductsAsync(pageSize: 1)).First();
+                var host = (await productService.SearchProductsAsync(pageSize: 5)).First();
 
-                if (vendor != null)
+                await Try(async () =>
                 {
+                    if (vendor == null)
+                        return;
                     admin.VendorId = vendor.Id;
                     await customerService.UpdateCustomerAsync(admin);
                     ClearWorkContextCaches();
@@ -2960,151 +2986,215 @@ public sealed class WebCoverageHarness
                     editModel.ShowOnHomepage = !host.ShowOnHomepage;
                     productController.ModelState.Clear();
                     await productController.Edit(editModel, true);
-
-                    admin.VendorId = previousVendorId;
-                    await customerService.UpdateCustomerAsync(admin);
-                    ClearWorkContextCaches();
-                }
-
-                var create = await productFactory.PrepareProductModelAsync(null, null);
-                create.Name = "Coverage harvest product " + Guid.NewGuid().ToString("N")[..6];
-                create.Sku = "COV" + Guid.NewGuid().ToString("N")[..6];
-                create.Published = true;
-                create.Price = 12;
-                productController.ModelState.Clear();
-                await productController.Create(create, true);
-
-                var specService = _services.GetRequiredService<ISpecificationAttributeService>();
-                var spec = (await specService.GetSpecificationAttributesWithOptionsAsync()).FirstOrDefault();
-                var options = spec == null
-                    ? []
-                    : await specService.GetSpecificationAttributeOptionsBySpecificationAttributeAsync(spec.Id);
-                var languages = await _services.GetRequiredService<ILanguageService>().GetAllLanguagesAsync(true);
-                var locales = languages.Select(language =>
-                    new global::Nop.Web.Areas.Admin.Models.Catalog.AddSpecificationAttributeLocalizedModel
-                    {
-                        LanguageId = language.Id,
-                        Value = "coverage",
-                        ValueRaw = "<b>coverage</b>"
-                    }).ToList();
-
-                foreach (var typeId in new[]
-                         {
-                             (int)SpecificationAttributeType.Option,
-                             (int)SpecificationAttributeType.CustomText,
-                             (int)SpecificationAttributeType.CustomHtmlText,
-                             (int)SpecificationAttributeType.Hyperlink
-                         })
-                {
-                    var add = new global::Nop.Web.Areas.Admin.Models.Catalog.AddSpecificationAttributeModel
-                    {
-                        ProductId = host.Id,
-                        AttributeTypeId = typeId,
-                        AttributeId = spec?.Id ?? 0,
-                        SpecificationAttributeOptionId = options.FirstOrDefault()?.Id ?? 0,
-                        Value = "coverage",
-                        ValueRaw = "<b>coverage</b>",
-                        AllowFiltering = true,
-                        ShowOnProductPage = true,
-                        Locales = locales
-                    };
-                    productController.ModelState.Clear();
-                    await productController.ProductSpecificationAttributeAdd(add, false);
-                    productController.ModelState.Clear();
-                    await productController.ProductSpecificationAttributeAdd(add, true);
-                }
-
-                var specs = await specService.GetProductSpecificationAttributesAsync(host.Id);
-                foreach (var psa in specs.Take(4))
-                {
-                    var update = new global::Nop.Web.Areas.Admin.Models.Catalog.AddSpecificationAttributeModel
-                    {
-                        ProductId = host.Id,
-                        SpecificationId = psa.Id,
-                        AttributeTypeId = (int)psa.AttributeType,
-                        SpecificationAttributeOptionId = psa.SpecificationAttributeOptionId,
-                        Value = "updated",
-                        ValueRaw = "<i>updated</i>",
-                        AllowFiltering = true,
-                        ShowOnProductPage = true,
-                        Locales = locales
-                    };
-                    productController.ModelState.Clear();
-                    await productController.ProductSpecAttrUpdate(update, false);
-                    productController.ModelState.Clear();
-                    await productController.ProductSpecAttrUpdate(update, true);
-                }
-
-                var attributeService = _services.GetRequiredService<IProductAttributeService>();
-                var unused = new ProductAttribute { Name = "Coverage unique " + Guid.NewGuid().ToString("N")[..6] };
-                await attributeService.InsertProductAttributeAsync(unused);
-                var mappingModel = await productFactory.PrepareProductAttributeMappingModelAsync(null, host, null);
-                mappingModel.ProductId = host.Id;
-                mappingModel.ProductAttributeId = unused.Id;
-                mappingModel.AttributeControlTypeId = (int)AttributeControlType.DropdownList;
-                productController.ModelState.Clear();
-                await productController.ProductAttributeMappingCreate(mappingModel, true);
-                mappingModel = await productFactory.PrepareProductAttributeMappingModelAsync(null, host, null);
-                mappingModel.ProductId = host.Id;
-                mappingModel.ProductAttributeId = unused.Id;
-                productController.ModelState.Clear();
-                await productController.ProductAttributeMappingCreate(mappingModel, false);
-
-                var videoUrl = StartLocalHttpResponder();
-                productController.ModelState.Clear();
-                await productController.ProductVideoAdd(host.Id, new global::Nop.Web.Areas.Admin.Models.Catalog.ProductVideoModel
-                {
-                    ProductId = host.Id,
-                    VideoUrl = videoUrl,
-                    DisplayOrder = 1
                 });
-                var videos = await productService.GetProductVideosByProductIdAsync(host.Id);
-                if (videos.Count == 0)
-                {
-                    var videoService = _services.GetRequiredService<IVideoService>();
-                    var video = new Video { VideoUrl = videoUrl };
-                    await videoService.InsertVideoAsync(video);
-                    await productService.InsertProductVideoAsync(new ProductVideo
-                    {
-                        ProductId = host.Id,
-                        VideoId = video.Id,
-                        DisplayOrder = 1
-                    });
-                    videos = await productService.GetProductVideosByProductIdAsync(host.Id);
-                }
+                admin.VendorId = previousVendorId;
+                await customerService.UpdateCustomerAsync(admin);
+                ClearWorkContextCaches();
 
-                var productVideo = videos.LastOrDefault();
-                if (productVideo != null)
+                await Try(async () =>
                 {
+                    var create = await productFactory.PrepareProductModelAsync(null, null);
+                    create.Name = "Coverage harvest product " + Guid.NewGuid().ToString("N")[..6];
+                    create.Sku = "COV" + Guid.NewGuid().ToString("N")[..6];
+                    create.Published = true;
+                    create.Price = 12;
                     productController.ModelState.Clear();
-                    await productController.ProductVideoUpdate(new global::Nop.Web.Areas.Admin.Models.Catalog.ProductVideoModel
+                    await productController.Create(create, true);
+                });
+
+                await Try(async () =>
+                {
+                    var specService = _services.GetRequiredService<ISpecificationAttributeService>();
+                    var spec = (await specService.GetSpecificationAttributesWithOptionsAsync()).FirstOrDefault();
+                    var options = spec == null
+                        ? []
+                        : await specService.GetSpecificationAttributeOptionsBySpecificationAttributeAsync(spec.Id);
+                    var languages = await _services.GetRequiredService<ILanguageService>().GetAllLanguagesAsync(true);
+                    var locales = languages.Select(language =>
+                        new global::Nop.Web.Areas.Admin.Models.Catalog.AddSpecificationAttributeLocalizedModel
+                        {
+                            LanguageId = language.Id,
+                            Value = "coverage",
+                            ValueRaw = "<b>coverage</b>"
+                        }).ToList();
+
+                    foreach (var typeId in new[]
+                             {
+                                 (int)SpecificationAttributeType.Option,
+                                 (int)SpecificationAttributeType.CustomText,
+                                 (int)SpecificationAttributeType.CustomHtmlText,
+                                 (int)SpecificationAttributeType.Hyperlink
+                             })
                     {
-                        Id = productVideo.Id,
-                        ProductId = host.Id,
-                        VideoUrl = videoUrl,
-                        DisplayOrder = 2
-                    });
-                    productController.ModelState.Clear();
-                    await productController.ProductVideoList(new global::Nop.Web.Areas.Admin.Models.Catalog.ProductVideoSearchModel
+                        var add = new global::Nop.Web.Areas.Admin.Models.Catalog.AddSpecificationAttributeModel
+                        {
+                            ProductId = host.Id,
+                            AttributeTypeId = typeId,
+                            AttributeId = spec?.Id ?? 0,
+                            SpecificationAttributeOptionId = options.FirstOrDefault()?.Id ?? 0,
+                            Value = "coverage",
+                            ValueRaw = "<b>coverage</b>",
+                            AllowFiltering = true,
+                            ShowOnProductPage = true,
+                            Locales = locales
+                        };
+                        productController.ModelState.Clear();
+                        await productController.ProductSpecificationAttributeAdd(add, false);
+                        productController.ModelState.Clear();
+                        await productController.ProductSpecificationAttributeAdd(add, true);
+                    }
+
+                    var specs = await specService.GetProductSpecificationAttributesAsync(host.Id);
+                    foreach (var psa in specs.Take(4))
+                    {
+                        var update = new global::Nop.Web.Areas.Admin.Models.Catalog.AddSpecificationAttributeModel
+                        {
+                            ProductId = host.Id,
+                            SpecificationId = psa.Id,
+                            AttributeTypeId = (int)psa.AttributeType,
+                            SpecificationAttributeOptionId = psa.SpecificationAttributeOptionId,
+                            Value = "updated",
+                            ValueRaw = "<i>updated</i>",
+                            AllowFiltering = true,
+                            ShowOnProductPage = true,
+                            Locales = locales
+                        };
+                        productController.ModelState.Clear();
+                        await productController.ProductSpecAttrUpdate(update, false);
+                        productController.ModelState.Clear();
+                        await productController.ProductSpecAttrUpdate(update, true);
+                    }
+
+                    var specSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductSpecificationAttributeSearchModel
                     {
                         ProductId = host.Id
-                    });
-                    productController.ModelState.Clear();
-                    await productController.ProductVideoDelete(productVideo.Id);
-                }
+                    };
+                    specSearch.SetGridPageSize();
+                    await productFactory.PrepareProductSpecificationAttributeListModelAsync(specSearch, host);
+                    await productFactory.PrepareAddSpecificationAttributeModelAsync(host.Id, null);
+                    if (specs.Count > 0)
+                        await productFactory.PrepareAddSpecificationAttributeModelAsync(host.Id, specs[0].Id);
+                });
 
-                var combination = (await attributeService.GetAllProductAttributeCombinationsAsync(host.Id)).FirstOrDefault();
-                if (combination != null)
+                await Try(async () =>
                 {
-                    var comboModel = await productFactory.PrepareProductAttributeCombinationModelAsync(null, host, combination);
-                    comboModel.PictureIds = (await productService.GetProductPicturesByProductIdAsync(host.Id))
-                        .Select(picture => picture.PictureId).Take(2).ToList();
-                    await InvokeInstanceMethodAsync(productController, "SaveAttributeCombinationPicturesAsync",
-                        host, combination, comboModel);
-                    if (comboModel.ProductAttributes?.Count > 0)
-                        await ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Product__ProductAttributes",
-                            comboModel.ProductAttributes);
-                }
+                    var attributeService = _services.GetRequiredService<IProductAttributeService>();
+                    var unused = new ProductAttribute { Name = "Coverage unique " + Guid.NewGuid().ToString("N")[..6] };
+                    await attributeService.InsertProductAttributeAsync(unused);
+                    var mappingModel = await productFactory.PrepareProductAttributeMappingModelAsync(null, host, null);
+                    mappingModel.ProductId = host.Id;
+                    mappingModel.ProductAttributeId = unused.Id;
+                    mappingModel.AttributeControlTypeId = (int)AttributeControlType.DropdownList;
+                    productController.ModelState.Clear();
+                    await productController.ProductAttributeMappingCreate(mappingModel, true);
+                    mappingModel = await productFactory.PrepareProductAttributeMappingModelAsync(null, host, null);
+                    mappingModel.ProductId = host.Id;
+                    mappingModel.ProductAttributeId = unused.Id;
+                    productController.ModelState.Clear();
+                    await productController.ProductAttributeMappingCreate(mappingModel, false);
+
+                    var mappingSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductAttributeMappingSearchModel
+                    {
+                        ProductId = host.Id
+                    };
+                    mappingSearch.SetGridPageSize();
+                    await productFactory.PrepareProductAttributeMappingListModelAsync(mappingSearch, host);
+                    var mappings = await attributeService.GetProductAttributeMappingsByProductIdAsync(host.Id);
+                    if (mappings.Count > 0)
+                    {
+                        var valueSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductAttributeValueSearchModel
+                        {
+                            ProductAttributeMappingId = mappings[0].Id
+                        };
+                        valueSearch.SetGridPageSize();
+                        await productFactory.PrepareProductAttributeValueListModelAsync(valueSearch, mappings[0]);
+                    }
+
+                    var comboSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductAttributeCombinationSearchModel
+                    {
+                        ProductId = host.Id
+                    };
+                    comboSearch.SetGridPageSize();
+                    await productFactory.PrepareProductAttributeCombinationListModelAsync(comboSearch, host);
+                });
+
+                await Try(async () =>
+                {
+                    var videoUrl = StartLocalHttpResponder();
+                    productController.ModelState.Clear();
+                    await productController.ProductVideoAdd(host.Id, new global::Nop.Web.Areas.Admin.Models.Catalog.ProductVideoModel
+                    {
+                        ProductId = host.Id,
+                        VideoUrl = videoUrl,
+                        DisplayOrder = 1
+                    });
+                    var videos = await productService.GetProductVideosByProductIdAsync(host.Id);
+                    if (videos.Count == 0)
+                    {
+                        var videoService = _services.GetRequiredService<IVideoService>();
+                        var video = new Video { VideoUrl = videoUrl };
+                        await videoService.InsertVideoAsync(video);
+                        await productService.InsertProductVideoAsync(new ProductVideo
+                        {
+                            ProductId = host.Id,
+                            VideoId = video.Id,
+                            DisplayOrder = 1
+                        });
+                        videos = await productService.GetProductVideosByProductIdAsync(host.Id);
+                    }
+
+                    var productVideo = videos.LastOrDefault();
+                    if (productVideo != null)
+                    {
+                        productController.ModelState.Clear();
+                        await productController.ProductVideoUpdate(new global::Nop.Web.Areas.Admin.Models.Catalog.ProductVideoModel
+                        {
+                            Id = productVideo.Id,
+                            ProductId = host.Id,
+                            VideoUrl = videoUrl,
+                            DisplayOrder = 2
+                        });
+                        var videoSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductVideoSearchModel
+                        {
+                            ProductId = host.Id
+                        };
+                        videoSearch.SetGridPageSize();
+                        await productController.ProductVideoList(videoSearch);
+                        await productFactory.PrepareProductVideoListModelAsync(videoSearch, host);
+                        productController.ModelState.Clear();
+                        await productController.ProductVideoDelete(productVideo.Id);
+                    }
+                });
+
+                await Try(async () =>
+                {
+                    var pictureSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductPictureSearchModel { ProductId = host.Id };
+                    pictureSearch.SetGridPageSize();
+                    await productFactory.PrepareProductPictureListModelAsync(pictureSearch, host);
+                    var tierSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.TierPriceSearchModel { ProductId = host.Id };
+                    tierSearch.SetGridPageSize();
+                    await productFactory.PrepareTierPriceListModelAsync(tierSearch, host);
+                    var orderSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductOrderSearchModel { ProductId = host.Id };
+                    orderSearch.SetGridPageSize();
+                    await productFactory.PrepareProductOrderListModelAsync(orderSearch, host);
+                    var crossSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.CrossSellProductSearchModel { ProductId = host.Id };
+                    crossSearch.SetGridPageSize();
+                    await productFactory.PrepareCrossSellProductListModelAsync(crossSearch, host);
+
+                    var attributeService = _services.GetRequiredService<IProductAttributeService>();
+                    var combination = (await attributeService.GetAllProductAttributeCombinationsAsync(host.Id)).FirstOrDefault();
+                    if (combination != null)
+                    {
+                        var comboModel = await productFactory.PrepareProductAttributeCombinationModelAsync(null, host, combination);
+                        comboModel.PictureIds = (await productService.GetProductPicturesByProductIdAsync(host.Id))
+                            .Select(picture => picture.PictureId).Take(2).ToList();
+                        await InvokeInstanceMethodAsync(productController, "SaveAttributeCombinationPicturesAsync",
+                            host, combination, comboModel);
+                        if (comboModel.ProductAttributes?.Count > 0)
+                            await ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Product__ProductAttributes",
+                                comboModel.ProductAttributes);
+                    }
+                });
             });
 
             await Try(async () =>
@@ -3261,15 +3351,15 @@ public sealed class WebCoverageHarness
                     await pm.SendPM(reply);
                     await pm.DeleteInboxPM(CreateForm(new Dictionary<string, string>
                     {
-                        [$"cb{message.Id}"] = "true"
+                        [$"pm{message.Id}"] = "on"
                     }));
                     await pm.DeleteSentPM(CreateForm(new Dictionary<string, string>
                     {
-                        [$"cb{message.Id}"] = "true"
+                        [$"pm{message.Id}"] = "on"
                     }));
                     await pm.MarkUnread(CreateForm(new Dictionary<string, string>
                     {
-                        [$"cb{message.Id}"] = "true"
+                        [$"pm{message.Id}"] = "on"
                     }));
                     await pm.DeletePM(message.Id);
                 }
@@ -3386,6 +3476,8 @@ public sealed class WebCoverageHarness
                             vendorModel.VendorAttributes);
                 }
             });
+
+            await ExerciseHighMissGoldAsync(admin, shopper, store);
         }
         finally
         {
@@ -3421,6 +3513,617 @@ public sealed class WebCoverageHarness
             await SetAdminStoreScopeAsync(0);
             await EnsurePlainProductInCartAsync();
         }
+    }
+
+    private async Task ExerciseHighMissGoldAsync(Customer admin, Customer shopper, Store store)
+    {
+        async Task Try(Func<Task> action)
+        {
+            try { await action(); } catch { }
+        }
+
+        var settingService = _services.GetRequiredService<ISettingService>();
+        var workContext = _services.GetRequiredService<IWorkContext>();
+        var customerService = _services.GetRequiredService<ICustomerService>();
+        var productService = _services.GetRequiredService<IProductService>();
+        var pluginsInfo = Singleton<IPluginsInfo>.Instance;
+
+        await Try(async () =>
+        {
+            pluginsInfo.IncompatiblePlugins ??= new Dictionary<string, PluginIncompatibleType>();
+            pluginsInfo.IncompatiblePlugins["Coverage.Incompatible.Main"] = PluginIncompatibleType.MainAssemblyNotFound;
+            pluginsInfo.IncompatiblePlugins["Coverage.Incompatible.Version"] = PluginIncompatibleType.NotCompatibleWithCurrentVersion;
+            pluginsInfo.AssemblyLoadedCollision ??= [];
+            var collision = new PluginLoadedAssemblyInfo("Coverage.Collision", new Version(13, 0, 0, 0));
+            collision.References.Add(("Coverage.Plugin", new Version(12, 0, 0, 0)));
+            pluginsInfo.AssemblyLoadedCollision.Add(collision);
+
+            var directory = Path.Combine(Path.GetTempPath(), "nop-coverage-plugins", "NotInstalled_Harvest");
+            Directory.CreateDirectory(directory);
+            var jsonPath = Path.Combine(directory, NopPluginDefaults.DescriptionFileName);
+            if (!File.Exists(jsonPath))
+                File.WriteAllText(jsonPath, "{}");
+            pluginsInfo.PluginDescriptors.Add((new PluginDescriptor
+            {
+                SystemName = "NotInstalled.Harvest.Plugin",
+                FriendlyName = "Not installed harvest plugin",
+                Group = "Misc",
+                Installed = false,
+                OriginalAssemblyFile = Path.Combine(directory, "plugin.dll"),
+                AssemblyFileName = "NotInstalled.Harvest.dll",
+                PluginType = typeof(TestWidgetPlugin)
+            }, false));
+
+            var commonFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICommonModelFactory>();
+            var warnings = new List<global::Nop.Web.Areas.Admin.Models.Common.SystemWarningModel>();
+            await commonFactory.PrepareSystemWarningModelsAsync();
+            await InvokeInstanceMethodAsync(commonFactory, "PrepareIncompatibleWarningModelAsync", warnings);
+            await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsCollisionsWarningModelAsync", warnings);
+            await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsInstalledWarningModelAsync", warnings);
+            await InvokeInstanceMethodAsync(commonFactory, "PreparePluginsEnabledWarningModelAsync", warnings);
+        });
+
+        await Try(async () =>
+        {
+            var currencySettings = _services.GetRequiredService<CurrencySettings>();
+            var measureSettings = _services.GetRequiredService<MeasureSettings>();
+            var catalogSettings = _services.GetRequiredService<CatalogSettings>();
+            var storeService = _services.GetRequiredService<IStoreService>();
+            var currencyService = _services.GetRequiredService<ICurrencyService>();
+            var commonFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ICommonModelFactory>();
+
+            var prevExchange = currencySettings.PrimaryExchangeRateCurrencyId;
+            var prevPrimary = currencySettings.PrimaryStoreCurrencyId;
+            var prevWeight = measureSettings.BaseWeightId;
+            var prevDimension = measureSettings.BaseDimensionId;
+            var prevIgnoreAcl = catalogSettings.IgnoreAcl;
+            var prevIgnoreStore = catalogSettings.IgnoreStoreLimitations;
+            var currentStore = await storeService.GetStoreByIdAsync(store.Id) ?? store;
+            var prevUrl = currentStore.Url;
+
+            try
+            {
+                currencySettings.PrimaryExchangeRateCurrencyId = 0;
+                currencySettings.PrimaryStoreCurrencyId = 0;
+                measureSettings.BaseWeightId = 0;
+                measureSettings.BaseDimensionId = 0;
+                catalogSettings.IgnoreAcl = false;
+                catalogSettings.IgnoreStoreLimitations = false;
+                await settingService.SaveSettingAsync(currencySettings);
+                await settingService.SaveSettingAsync(measureSettings);
+                await settingService.SaveSettingAsync(catalogSettings);
+                currentStore.Url = "http://coverage-mismatch.example/";
+                await storeService.UpdateStoreAsync(currentStore);
+                await commonFactory.PrepareSystemWarningModelsAsync();
+
+                currencySettings.PrimaryExchangeRateCurrencyId = prevExchange;
+                currencySettings.PrimaryStoreCurrencyId = prevPrimary;
+                measureSettings.BaseWeightId = prevWeight;
+                measureSettings.BaseDimensionId = prevDimension;
+                await settingService.SaveSettingAsync(currencySettings);
+                await settingService.SaveSettingAsync(measureSettings);
+                var exchange = await currencyService.GetCurrencyByIdAsync(prevExchange);
+                var prevRate = exchange?.Rate ?? 1;
+                if (exchange != null)
+                {
+                    exchange.Rate = prevRate == 1 ? 2 : 1;
+                    await currencyService.UpdateCurrencyAsync(exchange);
+                    await commonFactory.PrepareSystemWarningModelsAsync();
+                    exchange.Rate = prevRate;
+                    await currencyService.UpdateCurrencyAsync(exchange);
+                }
+
+                var weight = await _services.GetRequiredService<IMeasureService>().GetMeasureWeightByIdAsync(prevWeight);
+                if (weight != null && weight.Ratio == 1)
+                {
+                    weight.Ratio = 2;
+                    await _services.GetRequiredService<IMeasureService>().UpdateMeasureWeightAsync(weight);
+                    await commonFactory.PrepareSystemWarningModelsAsync();
+                    weight.Ratio = 1;
+                    await _services.GetRequiredService<IMeasureService>().UpdateMeasureWeightAsync(weight);
+                }
+
+                var dimension = await _services.GetRequiredService<IMeasureService>().GetMeasureDimensionByIdAsync(prevDimension);
+                if (dimension != null && dimension.Ratio == 1)
+                {
+                    dimension.Ratio = 2;
+                    await _services.GetRequiredService<IMeasureService>().UpdateMeasureDimensionAsync(dimension);
+                    await commonFactory.PrepareSystemWarningModelsAsync();
+                    dimension.Ratio = 1;
+                    await _services.GetRequiredService<IMeasureService>().UpdateMeasureDimensionAsync(dimension);
+                }
+            }
+            finally
+            {
+                currencySettings.PrimaryExchangeRateCurrencyId = prevExchange;
+                currencySettings.PrimaryStoreCurrencyId = prevPrimary;
+                measureSettings.BaseWeightId = prevWeight;
+                measureSettings.BaseDimensionId = prevDimension;
+                catalogSettings.IgnoreAcl = prevIgnoreAcl;
+                catalogSettings.IgnoreStoreLimitations = prevIgnoreStore;
+                currentStore.Url = prevUrl;
+                await settingService.SaveSettingAsync(currencySettings);
+                await settingService.SaveSettingAsync(measureSettings);
+                await settingService.SaveSettingAsync(catalogSettings);
+                await storeService.UpdateStoreAsync(currentStore);
+            }
+        });
+
+        await Try(async () =>
+        {
+            var filterSettings = _services.GetRequiredService<FilterLevelSettings>();
+            var previousEnabled = filterSettings.FilterLevelEnabled;
+            var previousHome = filterSettings.DisplayOnHomePage;
+            var previousDetails = filterSettings.DisplayOnProductDetailsPage;
+            filterSettings.FilterLevelEnabled = true;
+            filterSettings.DisplayOnHomePage = true;
+            filterSettings.DisplayOnProductDetailsPage = true;
+            await settingService.SaveSettingAsync(filterSettings);
+            try
+            {
+                var filterService = _services.GetRequiredService<IFilterLevelValueService>();
+                var filter = new FilterLevelValue
+                {
+                    FilterLevel1Value = "CoverageL1",
+                    FilterLevel2Value = "CoverageL2",
+                    FilterLevel3Value = "CoverageL3",
+                    CreatedOnUtc = DateTime.UtcNow,
+                    UpdatedOnUtc = DateTime.UtcNow
+                };
+                await filterService.InsertFilterLevelValueAsync(filter);
+                var host = (await productService.SearchProductsAsync(pageSize: 1)).First();
+                await filterService.InsertProductFilterLevelValueAsync(new FilterLevelValueProductMapping
+                {
+                    FilterLevelValueId = filter.Id,
+                    ProductId = host.Id
+                });
+
+                var filterController = CreateController<global::Nop.Web.Areas.Admin.Controllers.FilterLevelValueController>();
+                filterController.ModelState.Clear();
+                _ = filterController.Create();
+                var createModel = new global::Nop.Web.Areas.Admin.Models.Catalog.FilterLevelValueModel
+                {
+                    FilterLevel1Value = "HarvestL1",
+                    FilterLevel2Value = "HarvestL2",
+                    FilterLevel3Value = "HarvestL3",
+                    FilterLevel1ValueEnabled = true,
+                    FilterLevel2ValueEnabled = true,
+                    FilterLevel3ValueEnabled = true
+                };
+                filterController.ModelState.Clear();
+                await filterController.Create(createModel, true);
+                filterController.ModelState.Clear();
+                await filterController.Create(new global::Nop.Web.Areas.Admin.Models.Catalog.FilterLevelValueModel
+                {
+                    FilterLevel1Value = "CoverageL1",
+                    FilterLevel2Value = "CoverageL2",
+                    FilterLevel3Value = "CoverageL3"
+                }, false);
+                await filterController.Edit(filter.Id);
+                var editModel = new global::Nop.Web.Areas.Admin.Models.Catalog.FilterLevelValueModel
+                {
+                    Id = filter.Id,
+                    FilterLevel1Value = "CoverageL1X",
+                    FilterLevel2Value = "CoverageL2",
+                    FilterLevel3Value = "CoverageL3"
+                };
+                filterController.ModelState.Clear();
+                await filterController.Edit(editModel, true);
+                await filterController.ProductAddPopup(filter.Id);
+                var addSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.AddProductToFilterLevelValueSearchModel();
+                addSearch.SetGridPageSize();
+                await filterController.ProductAddPopupList(addSearch);
+                filterController.ModelState.Clear();
+                await filterController.ProductAddPopup(new global::Nop.Web.Areas.Admin.Models.Catalog.AddProductToFilterLevelValueModel
+                {
+                    FilterLevelValueId = filter.Id,
+                    SelectedProductIds = [host.Id]
+                });
+
+                var productFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
+                var filterSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.FilterLevelValueSearchModel { ProductId = host.Id };
+                filterSearch.SetGridPageSize();
+                await productFactory.PrepareFilterLevelValueListModelAsync(filterSearch, host);
+
+                var catalog = CreateController<global::Nop.Web.Controllers.CatalogController>();
+                await catalog.GetFilterLevelValues();
+                await catalog.GetFilterLevelValues("CoverageL1");
+                await catalog.GetFilterLevelValues("CoverageL1", "CoverageL2");
+                await catalog.GetFilterLevelValues("CoverageL1", "CoverageL2", "CoverageL3");
+                await catalog.SearchByFilterLevelValues(new global::Nop.Web.Models.Catalog.SearchFilterLevelValueModel
+                {
+                    fl1id = "CoverageL1",
+                    fl2id = "CoverageL2",
+                    fl3id = "CoverageL3"
+                }, new global::Nop.Web.Models.Catalog.CatalogProductsCommand());
+            }
+            finally
+            {
+                filterSettings.FilterLevelEnabled = previousEnabled;
+                filterSettings.DisplayOnHomePage = previousHome;
+                filterSettings.DisplayOnProductDetailsPage = previousDetails;
+                await settingService.SaveSettingAsync(filterSettings);
+            }
+        });
+
+        await Try(async () =>
+        {
+            var emailAccounts = _services.GetRequiredService<IEmailAccountService>();
+            var emails = await emailAccounts.GetAllEmailAccountsAsync();
+            var account = emails.FirstOrDefault();
+            var emailController = CreateController<global::Nop.Web.Areas.Admin.Controllers.EmailAccountController>();
+            if (account != null)
+            {
+                await emailController.Edit(account.Id);
+                await emailController.MarkAsDefaultEmail(account.Id);
+                var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IEmailAccountModelFactory>();
+                var model = await factory.PrepareEmailAccountModelAsync(null, account);
+                model.SendTestEmailTo = "not-an-email";
+                emailController.ModelState.Clear();
+                await emailController.SendTestEmail(model);
+                model.SendTestEmailTo = "coverage-test@example.com";
+                emailController.ModelState.Clear();
+                await emailController.SendTestEmail(model);
+                await emailController.AuthReturn(new global::Google.Apis.Auth.OAuth2.Responses.AuthorizationCodeResponseUrl());
+                await emailController.AuthReturn(new global::Google.Apis.Auth.OAuth2.Responses.AuthorizationCodeResponseUrl
+                {
+                    State = account.Id.ToString(),
+                    Error = "access_denied"
+                });
+                await emailController.AuthReturn(new global::Google.Apis.Auth.OAuth2.Responses.AuthorizationCodeResponseUrl
+                {
+                    State = account.Id.ToString(),
+                    Code = string.Empty
+                });
+            }
+
+            var create = new global::Nop.Web.Areas.Admin.Models.Messages.EmailAccountModel
+            {
+                Email = $"harvest-{Guid.NewGuid():N}@example.com",
+                DisplayName = "Harvest mail",
+                Host = "localhost",
+                Port = 25,
+                Username = "harvest",
+                Password = "harvest"
+            };
+            emailController.ModelState.Clear();
+            await emailController.Create(create, true);
+        });
+
+        await Try(async () =>
+        {
+            var productController = CreateController<global::Nop.Web.Areas.Admin.Controllers.ProductController>();
+            var host = (await productService.SearchProductsAsync(pageSize: 1)).First();
+            productController.ModelState.Clear();
+            await productController.CopyProduct(new global::Nop.Web.Areas.Admin.Models.Catalog.ProductModel
+            {
+                CopyProductModel = new global::Nop.Web.Areas.Admin.Models.Catalog.CopyProductModel
+                {
+                    Id = host.Id,
+                    Name = "Coverage copy " + Guid.NewGuid().ToString("N")[..6],
+                    Published = true,
+                    CopyMultimedia = true
+                }
+            });
+            await productController.SkuReservedWarning(host.Id, host.Sku);
+            await productController.SkuReservedWarning(0, "COV-UNIQUE-" + Guid.NewGuid().ToString("N")[..6]);
+            await productController.Create();
+            var create = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductModel
+            {
+                Name = "Harvest minimal " + Guid.NewGuid().ToString("N")[..6],
+                Sku = "HMIN" + Guid.NewGuid().ToString("N")[..6],
+                Price = 9,
+                Published = true,
+                ProductTypeId = (int)ProductType.SimpleProduct,
+                VisibleIndividually = true,
+                IsShipEnabled = true,
+                StockQuantity = 10,
+                OrderMinimumQuantity = 1,
+                OrderMaximumQuantity = 10000,
+                ManageInventoryMethodId = (int)ManageInventoryMethod.DontManageStock
+            };
+            productController.ModelState.Clear();
+            await productController.Create(create, false);
+
+            var specService = _services.GetRequiredService<ISpecificationAttributeService>();
+            var specs = await specService.GetProductSpecificationAttributesAsync(host.Id);
+            foreach (var psa in specs.Take(4))
+            {
+                var update = new global::Nop.Web.Areas.Admin.Models.Catalog.AddSpecificationAttributeModel
+                {
+                    ProductId = host.Id,
+                    SpecificationId = psa.Id,
+                    AttributeTypeId = (int)psa.AttributeType,
+                    SpecificationAttributeOptionId = psa.SpecificationAttributeOptionId,
+                    Value = "harvest",
+                    ValueRaw = "<b>harvest</b>",
+                    AllowFiltering = true,
+                    ShowOnProductPage = true
+                };
+                productController.ModelState.Clear();
+                await productController.ProductSpecAttrUpdate(update, false);
+            }
+
+            var attributeService = _services.GetRequiredService<IProductAttributeService>();
+            var unused = new ProductAttribute { Name = "Harvest predefined " + Guid.NewGuid().ToString("N")[..6] };
+            await attributeService.InsertProductAttributeAsync(unused);
+            await attributeService.InsertPredefinedProductAttributeValueAsync(new PredefinedProductAttributeValue
+            {
+                ProductAttributeId = unused.Id,
+                Name = "Harvest value",
+                PriceAdjustment = 1,
+                DisplayOrder = 1
+            });
+            var mappingModel = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductAttributeMappingModel
+            {
+                ProductId = host.Id,
+                ProductAttributeId = unused.Id,
+                AttributeControlTypeId = (int)AttributeControlType.DropdownList
+            };
+            productController.ModelState.Clear();
+            await productController.ProductAttributeMappingCreate(mappingModel, false);
+
+            var role = await customerService.GetCustomerRoleBySystemNameAsync(NopCustomerDefaults.RegisteredRoleName);
+            await productService.InsertTierPriceAsync(new TierPrice
+            {
+                ProductId = host.Id,
+                StoreId = store.Id,
+                CustomerRoleId = role?.Id,
+                Quantity = 3,
+                Price = 8
+            });
+            var productFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IProductModelFactory>();
+            var tierSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.TierPriceSearchModel { ProductId = host.Id };
+            tierSearch.SetGridPageSize();
+            await productFactory.PrepareTierPriceListModelAsync(tierSearch, host);
+            var specSearch = new global::Nop.Web.Areas.Admin.Models.Catalog.ProductSpecificationAttributeSearchModel { ProductId = host.Id };
+            specSearch.SetGridPageSize();
+            await productFactory.PrepareProductSpecificationAttributeListModelAsync(specSearch, host);
+        });
+
+        await Try(async () =>
+        {
+            var cartService = _services.GetRequiredService<IShoppingCartService>();
+            var cart = await cartService.GetShoppingCartAsync(admin, ShoppingCartType.ShoppingCart, store.Id);
+            foreach (var item in cart.ToList())
+            {
+                try { await cartService.DeleteShoppingCartItemAsync(item); }
+                catch { }
+            }
+
+            await EnsurePlainProductInCartAsync();
+            var orderSettings = _services.GetRequiredService<OrderSettings>();
+            var previousOpc = orderSettings.OnePageCheckoutEnabled;
+            orderSettings.OnePageCheckoutEnabled = false;
+            await settingService.SaveSettingAsync(orderSettings);
+            try
+            {
+                var checkout = CreateController<global::Nop.Web.Controllers.CheckoutController>();
+                checkout.ModelState.Clear();
+                await checkout.Index();
+                checkout.ModelState.Clear();
+                await checkout.BillingAddress(CreateForm());
+            }
+            finally
+            {
+                orderSettings.OnePageCheckoutEnabled = previousOpc;
+                await settingService.SaveSettingAsync(orderSettings);
+                await EnsurePlainProductInCartAsync();
+            }
+        });
+
+        await Try(async () =>
+        {
+            var guest = await customerService.InsertGuestCustomerAsync();
+            await workContext.SetCurrentCustomerAsync(guest);
+            ClearWorkContextCaches();
+            var publicCustomer = CreateController<global::Nop.Web.Controllers.CustomerController>();
+            var publicFactory = _services.GetRequiredService<global::Nop.Web.Factories.ICustomerModelFactory>();
+            var register = await publicFactory.PrepareRegisterModelAsync(
+                new global::Nop.Web.Models.Customer.RegisterModel(), false);
+            register.Email = $"harvest-nl-{Guid.NewGuid():N}@example.com";
+            register.Password = "1q2w3e4r5t";
+            register.ConfirmPassword = register.Password;
+            register.FirstName = "Harvest";
+            register.LastName = "News";
+            foreach (var subscription in register.NewsLetterSubscriptions)
+                subscription.IsActive = true;
+            if (register.NewsLetterSubscriptions.Count == 0)
+            {
+                register.NewsLetterSubscriptions.Add(new global::Nop.Web.Models.Customer.NewsLetterSubscriptionModel
+                {
+                    TypeId = 1,
+                    Name = "General",
+                    IsActive = true
+                });
+            }
+
+            var newsLetter = _services.GetRequiredService<INewsLetterSubscriptionService>();
+            await newsLetter.InsertNewsLetterSubscriptionAsync(new NewsLetterSubscription
+            {
+                Email = register.Email,
+                Active = true,
+                StoreId = store.Id,
+                TypeId = register.NewsLetterSubscriptions[0].TypeId,
+                CreatedOnUtc = DateTime.UtcNow,
+                NewsLetterSubscriptionGuid = Guid.NewGuid()
+            });
+            register.NewsLetterSubscriptions.Add(new global::Nop.Web.Models.Customer.NewsLetterSubscriptionModel
+            {
+                TypeId = register.NewsLetterSubscriptions[0].TypeId + 17,
+                Name = "Extra",
+                IsActive = true
+            });
+            publicCustomer.ModelState.Clear();
+            await publicCustomer.Register(register, "/registerresult/1", true, await CreateCustomerAttributeFormAsync());
+            await workContext.SetCurrentCustomerAsync(admin);
+            ClearWorkContextCaches();
+        });
+
+        await Try(async () =>
+        {
+            var settings = CreateController<global::Nop.Web.Areas.Admin.Controllers.SettingController>();
+            var factory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.ISettingModelFactory>();
+            await EnableAdminStoreScopeAsync();
+            var customerUser = await factory.PrepareCustomerUserSettingsModelAsync();
+            var previousRule = customerUser.CustomerSettings.UsernameValidationRule;
+            customerUser.CustomerSettings.UsernameValidationEnabled = true;
+            customerUser.CustomerSettings.UsernameValidationUseRegex = true;
+            customerUser.CustomerSettings.UsernameValidationRule = "[invalid(";
+            customerUser.CustomerSettings.PhoneNumberValidationEnabled = true;
+            customerUser.CustomerSettings.PhoneNumberValidationUseRegex = true;
+            customerUser.CustomerSettings.PhoneNumberValidationRule = "[invalid(";
+            settings.ModelState.Clear();
+            await settings.CustomerUser(customerUser);
+            customerUser = await factory.PrepareCustomerUserSettingsModelAsync();
+            customerUser.CustomerSettings.UsernameValidationRule = previousRule;
+            settings.ModelState.Clear();
+            await settings.CustomerUser(customerUser);
+            await SetAdminStoreScopeAsync(0);
+        });
+
+        await Try(async () =>
+        {
+            var pluginController = CreateController<global::Nop.Web.Areas.Admin.Controllers.PluginController>();
+            try
+            {
+                await pluginController.Uninstall(CreateForm(new Dictionary<string, string>
+                {
+                    ["uninstall-plugin-link-CurrencyExchange.TestProvider"] = "1"
+                }));
+            }
+            catch { }
+            try
+            {
+                await pluginController.Install(CreateForm(new Dictionary<string, string>
+                {
+                    ["install-plugin-link-CurrencyExchange.TestProvider"] = "1"
+                }));
+            }
+            catch { }
+            try
+            {
+                await pluginController.UninstallAndDeleteUnusedPlugins(["Does.Not.Exist"]);
+            }
+            catch { }
+        });
+
+        await Try(async () =>
+        {
+            var shipping = new global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel
+            {
+                DisplayPickupInStore = true,
+                NewAddressPreselected = true,
+                SelectedBillingAddress = 0
+            };
+            shipping.PickupPointsModel = new global::Nop.Web.Models.Checkout.CheckoutPickupPointsModel
+            {
+                AllowPickupInStore = true,
+                PickupInStore = false,
+                PickupInStoreOnly = false,
+                DisplayPickupPointsOnMap = true,
+                GoogleMapsApiKey = "coverage",
+                PickupPoints =
+                [
+                    new global::Nop.Web.Models.Checkout.CheckoutPickupPointModel
+                    {
+                        Id = "1",
+                        Name = "Warehouse",
+                        Address = "1 Main",
+                        City = "Town",
+                        CountryName = "United States",
+                        PickupFee = "$0.00",
+                        ProviderSystemName = "PickupPoint.TestProvider",
+                        OpeningHours = "9-5"
+                    }
+                ]
+            };
+            shipping.ExistingAddresses =
+            [
+                new global::Nop.Web.Models.Common.AddressModel
+                {
+                    Id = 1,
+                    FirstName = "Ann",
+                    LastName = "Admin",
+                    Email = admin.Email,
+                    PhoneEnabled = true,
+                    PhoneNumber = "5550001111",
+                    CityEnabled = true,
+                    City = "New York",
+                    StreetAddressEnabled = true,
+                    Address1 = "1 Coverage"
+                }
+            ];
+            shipping.InvalidExistingAddresses =
+            [
+                new global::Nop.Web.Models.Common.AddressModel { Id = 2, FirstName = "Bad", LastName = "Address" }
+            ];
+            await ExerciseRazorPageWithModelAsync("Views_Checkout_ShippingAddress", shipping);
+            await ExerciseRazorPageWithModelAsync("Views_Checkout__PickupPoints", shipping.PickupPointsModel);
+
+            var returns = new global::Nop.Web.Models.Order.SubmitReturnRequestModel
+            {
+                OrderId = 1,
+                CustomOrderNumber = "1",
+                Comments = "coverage",
+                AllowFiles = true,
+                Result = "Your return request has been submitted successfully.",
+                Items =
+                [
+                    new global::Nop.Web.Models.Order.SubmitReturnRequestModel.OrderItemModel
+                    {
+                        Id = 1,
+                        ProductId = 1,
+                        ProductName = "Build your own computer",
+                        ProductSeName = "build-your-own-computer",
+                        AttributeInfo = "RAM: 2 GB",
+                        Quantity = 2,
+                        UnitPrice = "$1,200.00"
+                    }
+                ],
+                AvailableReturnReasons = [new() { Id = 1, Name = "Damaged" }],
+                AvailableReturnActions = [new() { Id = 1, Name = "Refund" }]
+            };
+            await ExerciseRazorPageWithModelAsync("Views_ReturnRequest_ReturnRequest", returns);
+
+            var order = new global::Nop.Web.Areas.Admin.Models.Orders.OrderModel
+            {
+                AllowCustomersToSelectTaxDisplayType = true,
+                TaxDisplayType = TaxDisplayType.IncludingTax,
+                OrderSubtotalInclTax = "$10.00",
+                OrderSubtotalExclTax = "$8.00",
+                OrderSubTotalDiscountInclTax = "$1.00",
+                OrderSubTotalDiscountExclTax = "$0.80",
+                OrderShippingInclTax = "$2.00",
+                OrderShippingExclTax = "$1.60",
+                PaymentMethodAdditionalFeeInclTax = "$0.50",
+                PaymentMethodAdditionalFeeExclTax = "$0.40",
+                OrderTotalDiscount = "$0.10",
+                OrderTotal = "$12.00",
+                CanCancelOrder = true,
+                CanCapture = true,
+                CanMarkOrderAsPaid = true,
+                CanRefund = true,
+                CanRefundOffline = true,
+                CanPartiallyRefund = true,
+                CanPartiallyRefundOffline = true,
+                CanVoid = true,
+                CanVoidOffline = true,
+                HasDownloadableProducts = true,
+                CheckoutAttributeInfo = "Gift wrapping"
+            };
+            order.TaxRates.Add(new global::Nop.Web.Areas.Admin.Models.Orders.OrderModel.TaxRate { Rate = "10", Value = "$1.00" });
+            order.GiftCards.Add(new global::Nop.Web.Areas.Admin.Models.Orders.OrderModel.GiftCard { CouponCode = "GIFT", Amount = "$5.00" });
+            order.Items.Add(new global::Nop.Web.Areas.Admin.Models.Orders.OrderItemModel { ProductName = "Coverage", Quantity = 1 });
+            await ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Order__OrderDetails_Info", order);
+
+            var tables = new DataTablesModel();
+            EnrichDataTablesModel(tables);
+            await ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Shared__Table_Definition", tables);
+            tables.Data = "[]";
+            tables.UrlRead = new DataUrl("/coverage/list", true);
+            await ExerciseRazorPageWithModelAsync("Areas_Admin_Views_Shared__Table_Definition", tables);
+        });
     }
 
     private static async Task<object> AwaitResult(object raw)
@@ -4299,28 +5002,7 @@ public sealed class WebCoverageHarness
         }
 
         if (model is DataTablesModel tables)
-        {
-            if (string.IsNullOrEmpty(tables.Name))
-                tables.Name = "coverage-grid";
-            tables.UrlRead ??= new DataUrl("List", "Product", new RouteValueDictionary());
-            tables.UrlDelete ??= new DataUrl("/coverage/delete", "id");
-            tables.UrlUpdate ??= new DataUrl("/coverage/update", true);
-            if (tables.ColumnCollection == null || tables.ColumnCollection.Count == 0)
-            {
-                tables.ColumnCollection =
-                [
-                    new ColumnProperty("Name") { Title = "Name", Visible = true, Searchable = true, AutoWidth = true },
-                    new ColumnProperty("Id") { Title = "Id", IsMasterCheckBox = true, Width = "50" }
-                ];
-            }
-
-            if (tables.Filters == null || tables.Filters.Count == 0)
-                tables.Filters = [new FilterParameter("Name")];
-            if (string.IsNullOrEmpty(tables.LengthMenu))
-                tables.LengthMenu = "10,15,20";
-            if (tables.Length <= 0)
-                tables.Length = 15;
-        }
+            EnrichDataTablesModel(tables);
 
         if (model is DataUrl dataUrl)
         {
@@ -4452,6 +5134,137 @@ public sealed class WebCoverageHarness
                 // skip unreadable properties
             }
         }
+
+        if (model is global::Nop.Web.Models.Checkout.CheckoutShippingAddressModel shipping)
+        {
+            shipping.DisplayPickupInStore = true;
+            shipping.NewAddressPreselected = true;
+            shipping.PickupPointsModel ??= new global::Nop.Web.Models.Checkout.CheckoutPickupPointsModel();
+            shipping.PickupPointsModel.AllowPickupInStore = true;
+            shipping.PickupPointsModel.PickupInStore = false;
+            shipping.PickupPointsModel.PickupInStoreOnly = false;
+            if (shipping.PickupPointsModel.PickupPoints.Count == 0)
+            {
+                shipping.PickupPointsModel.PickupPoints.Add(new global::Nop.Web.Models.Checkout.CheckoutPickupPointModel
+                {
+                    Id = "1",
+                    Name = "Warehouse",
+                    Address = "1 Main",
+                    PickupFee = "$0.00"
+                });
+            }
+
+            if (shipping.ExistingAddresses.Count == 0)
+                shipping.ExistingAddresses.Add(new global::Nop.Web.Models.Common.AddressModel { Id = 1, FirstName = "Ann", LastName = "Admin", Email = "a@b.c", PhoneEnabled = true });
+            if (shipping.InvalidExistingAddresses.Count == 0)
+                shipping.InvalidExistingAddresses.Add(new global::Nop.Web.Models.Common.AddressModel { Id = 2, FirstName = "Bad" });
+        }
+
+        if (model is global::Nop.Web.Models.Order.SubmitReturnRequestModel returnRequest)
+        {
+            if (returnRequest.Items.Count == 0)
+            {
+                returnRequest.Items.Add(new global::Nop.Web.Models.Order.SubmitReturnRequestModel.OrderItemModel
+                {
+                    Id = 1,
+                    ProductName = "Coverage",
+                    ProductSeName = "coverage",
+                    AttributeInfo = "Size: M",
+                    Quantity = 2,
+                    UnitPrice = "$1.00"
+                });
+            }
+
+            returnRequest.AllowFiles = true;
+            if (string.IsNullOrEmpty(returnRequest.Result))
+                returnRequest.Result = "submitted";
+            if (returnRequest.AvailableReturnReasons.Count == 0)
+                returnRequest.AvailableReturnReasons.Add(new() { Id = 1, Name = "Damaged" });
+            if (returnRequest.AvailableReturnActions.Count == 0)
+                returnRequest.AvailableReturnActions.Add(new() { Id = 1, Name = "Refund" });
+        }
+
+        if (model is global::Nop.Web.Areas.Admin.Models.Orders.OrderModel order)
+        {
+            order.AllowCustomersToSelectTaxDisplayType = true;
+            order.OrderSubtotalInclTax = "$10.00";
+            order.OrderSubtotalExclTax = "$8.00";
+            order.OrderSubTotalDiscountInclTax = "$1.00";
+            order.OrderSubTotalDiscountExclTax = "$0.80";
+            order.OrderShippingInclTax = "$2.00";
+            order.OrderShippingExclTax = "$1.60";
+            order.PaymentMethodAdditionalFeeInclTax = "$0.50";
+            order.PaymentMethodAdditionalFeeExclTax = "$0.40";
+            order.CanCancelOrder = true;
+            order.CanCapture = true;
+            order.CanRefund = true;
+        }
+    }
+
+    private static void EnrichDataTablesModel(DataTablesModel tables)
+    {
+        if (string.IsNullOrEmpty(tables.Name))
+            tables.Name = "coverage-grid";
+        tables.UrlRead = new DataUrl("List", "Product", new RouteValueDictionary());
+        tables.UrlDelete = new DataUrl("~/Admin/Product/Delete", true);
+        tables.UrlUpdate = new DataUrl("/Admin/Product/Update");
+        tables.HeaderCallback = "function(){}";
+        tables.FooterCallback = "function(){}";
+        tables.DrawCallback = "function(){}";
+        tables.Processing = true;
+        tables.ServerSide = true;
+        tables.Paging = true;
+        tables.Info = true;
+        tables.RefreshButton = true;
+        tables.DeferLoading = 10;
+        tables.RowIdBasedOnField = "Name";
+        tables.Length = 15;
+        tables.LengthMenu = "10,15,20";
+        tables.PrimaryKeyColumn ??= "Id";
+        tables.Filters =
+        [
+            new FilterParameter("SearchName"),
+            new FilterParameter("SearchSku", "SearchModel"),
+            new FilterParameter("ProductId", "Id", true),
+            new FilterParameter("Published", true),
+            new FilterParameter("PageSize", 15),
+            new FilterParameter("CreatedOn", typeof(DateTime?))
+        ];
+        tables.LayoutCollection =
+        [
+            new LayoutOption { Name = "topStart", OptionType = LayoutOptionType.Null },
+            new LayoutOption { Name = "topEnd", OptionType = LayoutOptionType.String, Value = "search" },
+            new LayoutOption { Name = "bottomStart", OptionType = LayoutOptionType.Object, Value = "{}" },
+            new LayoutOption { Name = "bottom", OptionType = LayoutOptionType.Array, Value = new List<string> { "paging", "info" } }
+        ];
+        var actionUrl = new DataUrl("Edit", "Product", new RouteValueDictionary());
+        var rawUrl = new DataUrl("/Admin/Product/Edit", "Id");
+        tables.ColumnCollection =
+        [
+            new ColumnProperty("Id") { Title = "Id", IsMasterCheckBox = true, Width = "50", Visible = true, Render = new RenderCheckBox("checkbox_products") },
+            new ColumnProperty("Select") { Title = string.Empty, IsMasterCheckBox = true, Width = "20" },
+            new ColumnProperty("Name") { Title = "Name", Visible = true, Searchable = true, AutoWidth = true, Encode = true, ClassName = NopColumnClassDefaults.CenterAll, Render = new RenderLink(actionUrl) { Title = "Open" } },
+            new ColumnProperty("Sku") { Title = "Sku", Render = new RenderLink(rawUrl) },
+            new ColumnProperty("Published") { Title = "Published", Render = new RenderBoolean() },
+            new ColumnProperty("Price") { Title = "Price", Render = new RenderCustom("function(data){ return data; }") },
+            new ColumnProperty("Gtin") { Title = "Gtin", Render = new RenderButtonEdit(actionUrl) },
+            new ColumnProperty("ManufacturerPartNumber") { Title = "MPN", Render = new RenderButtonView(actionUrl) },
+            new ColumnProperty("DisplayOrder") { Title = "Order", Render = new RenderButtonsInlineEdit() },
+            new ColumnProperty("PictureUrl") { Title = "Picture", Render = new RenderPicture("PictureUrl") },
+            new ColumnProperty("CreatedOn") { Title = "Created", Render = new RenderDate() },
+            new ColumnProperty("Delete") { Title = "Delete", Render = new RenderButtonRemove("delete") },
+            new ColumnProperty("Custom") { Title = "Custom", Render = new RenderButtonCustom("btn", "Go") { Url = "/go", OnClickFunctionName = "go" } },
+            new ColumnProperty("Child") { Title = "Child", Render = new RenderChildCaret() }
+        ];
+        tables.ChildTable = new DataTablesModel
+        {
+            Name = "coverage-child",
+            IsChildTable = true,
+            UrlRead = new DataUrl("/coverage/child"),
+            UrlUpdate = new DataUrl("/coverage/child-update"),
+            ColumnCollection = [new ColumnProperty("Sku") { Title = "Sku" }],
+            Filters = [new FilterParameter("ProductId", "Id", true)]
+        };
     }
 
     private static bool IsCollectionType(Type type, out Type itemType)
