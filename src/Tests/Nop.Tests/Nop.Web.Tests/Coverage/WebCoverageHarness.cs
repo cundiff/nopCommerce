@@ -34,6 +34,7 @@ using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
 using Nop.Core.Domain.Shipping;
 using Nop.Core.Domain.Stores;
+using Nop.Core.Domain.Tax;
 using Nop.Core.Domain.Vendors;
 using Nop.Core.Events;
 using Nop.Data;
@@ -2079,12 +2080,10 @@ public sealed class WebCoverageHarness
                 var pluginService = _services.GetRequiredService<IPluginService>();
                 var pluginFactory = _services.GetRequiredService<global::Nop.Web.Areas.Admin.Factories.IPluginModelFactory>();
                 var pluginController = CreateController<global::Nop.Web.Areas.Admin.Controllers.PluginController>();
-                foreach (var systemName in new[] { "Payments.TestMethod", "FixedRateTestShippingRateComputationMethod" })
+                var descriptors = await pluginService.GetPluginDescriptorsAsync<IPlugin>(LoadPluginsMode.All);
+                foreach (var descriptor in descriptors.Take(20))
                 {
-                    await pluginController.EditPopup(systemName);
-                    var descriptor = await pluginService.GetPluginDescriptorBySystemNameAsync<IPlugin>(systemName, LoadPluginsMode.All);
-                    if (descriptor == null)
-                        continue;
+                    await pluginController.EditPopup(descriptor.SystemName);
                     var model = await pluginFactory.PreparePluginModelAsync(null, descriptor);
                     model.IsEnabled = true;
                     pluginController.ModelState.Clear();
@@ -2101,16 +2100,29 @@ public sealed class WebCoverageHarness
             await Try(async () =>
             {
                 var orderService = _services.GetRequiredService<IOrderService>();
+                var productService = _services.GetRequiredService<IProductService>();
                 var orders = await orderService.SearchOrdersAsync(customerId: admin.Id, pageIndex: 0, pageSize: 10);
                 if (orders.Count == 0)
                     orders = await orderService.SearchOrdersAsync(pageIndex: 0, pageSize: 5);
+
                 foreach (var existingOrder in orders)
                 {
+                    existingOrder.CustomerId = admin.Id;
+                    existingOrder.Deleted = false;
                     existingOrder.OrderStatus = OrderStatus.Complete;
+                    existingOrder.CreatedOnUtc = DateTime.UtcNow.AddDays(-1);
                     await orderService.UpdateOrderAsync(existingOrder);
+                    foreach (var item in await orderService.GetOrderItemsAsync(existingOrder.Id))
+                    {
+                        var product = await productService.GetProductByIdAsync(item.ProductId);
+                        if (product == null || !product.NotReturnable)
+                            continue;
+                        product.NotReturnable = false;
+                        await productService.UpdateProductAsync(product);
+                    }
                 }
 
-                var returnOrder = orders.FirstOrDefault(o => o.CustomerId == admin.Id) ?? orders.FirstOrDefault();
+                var returnOrder = orders.FirstOrDefault();
                 if (returnOrder == null)
                     return;
 
@@ -2246,6 +2258,27 @@ public sealed class WebCoverageHarness
 
             await Try(async () =>
             {
+                var productService = _services.GetRequiredService<IProductService>();
+                var shoppingCart = CreateController<global::Nop.Web.Controllers.ShoppingCartController>();
+                foreach (var product in (await productService.SearchProductsAsync(pageSize: 40)).Take(20))
+                {
+                    shoppingCart.ModelState.Clear();
+                    await shoppingCart.AddProductToCart_Catalog(product.Id, (int)ShoppingCartType.ShoppingCart, 1, true);
+                    shoppingCart.ModelState.Clear();
+                    await shoppingCart.AddProductToCart_Catalog(product.Id, (int)ShoppingCartType.Wishlist, 1, false);
+                    shoppingCart.ModelState.Clear();
+                    await shoppingCart.AddProductToCart_Catalog(product.Id, (int)ShoppingCartType.ShoppingCart, 0, false);
+                }
+
+                var plain = await EnsurePlainProductAsync();
+                shoppingCart.ModelState.Clear();
+                await shoppingCart.AddProductToCart_Catalog(plain.Id, (int)ShoppingCartType.ShoppingCart, 1, true);
+                shoppingCart.ModelState.Clear();
+                await shoppingCart.AddProductToCart_Catalog(plain.Id, (int)ShoppingCartType.ShoppingCart, 1, false);
+            });
+
+            await Try(async () =>
+            {
                 var discountService = _services.GetRequiredService<IDiscountService>();
                 var discount = (await discountService.GetAllDiscountsAsync(showHidden: true, isActive: null)).FirstOrDefault();
                 if (discount == null)
@@ -2320,26 +2353,36 @@ public sealed class WebCoverageHarness
             {
                 admin.VendorId = previousVendorId;
                 await customerService.UpdateCustomerAsync(admin);
-                ClearWorkContextCaches();
                 await workContext.SetCurrentCustomerAsync(admin);
-                var guest = await customerService.InsertGuestCustomerAsync();
-                var email = $"cov-vendor-{Guid.NewGuid():N}@example.com";
-                await _services.GetRequiredService<ICustomerRegistrationService>().RegisterCustomerAsync(
-                    new CustomerRegistrationRequest(guest, email, email, "1q2w3e4r5t",
-                        customerSettings.DefaultPasswordFormat, store.Id));
-                await workContext.SetCurrentCustomerAsync(guest);
+                ClearWorkContextCaches();
+
+                var registeredRole = await customerService.GetCustomerRoleBySystemNameAsync(NopCustomerDefaults.RegisteredRoleName);
+                var shoppers = registeredRole == null
+                    ? Enumerable.Empty<Customer>()
+                    : (IEnumerable<Customer>)await customerService.GetAllCustomersAsync(customerRoleIds: [registeredRole.Id], pageSize: 30);
+                var shopper = shoppers.FirstOrDefault(candidate =>
+                    candidate.Id != admin.Id && !string.IsNullOrEmpty(candidate.Email)
+                    && !string.Equals(candidate.Email, global::Nop.Tests.NopTestsDefaults.AdminEmail, StringComparison.OrdinalIgnoreCase));
+                if (shopper == null)
+                    return;
+                if (await customerService.IsAdminAsync(shopper))
+                    return;
+
+                await workContext.SetCurrentCustomerAsync(shopper);
                 ClearWorkContextCaches();
                 var vendorController = CreateController<global::Nop.Web.Controllers.VendorController>();
                 var vendorFactory = _services.GetRequiredService<global::Nop.Web.Factories.IVendorModelFactory>();
                 var apply = await vendorFactory.PrepareApplyVendorModelAsync(
                     new global::Nop.Web.Models.Vendors.ApplyVendorModel(), false, false, null);
                 apply.Name = "Coverage Vendor " + Guid.NewGuid().ToString("N")[..8];
-                apply.Email = email;
+                apply.Email = shopper.Email;
                 apply.Description = "Coverage apply";
                 var (values, files) = await BuildAttributeFormAsync<VendorAttribute, VendorAttributeValue>("vendor_attribute_");
                 vendorController.ModelState.Clear();
                 await vendorController.ApplyVendorSubmit(apply, true, CreateFormFile("uploadedFile", "vendor.jpg"),
                     CreateForm(values, true, files));
+                await workContext.SetCurrentCustomerAsync(admin);
+                ClearWorkContextCaches();
             });
 
             await Try(async () =>
@@ -2374,6 +2417,8 @@ public sealed class WebCoverageHarness
 
             await Try(async () =>
             {
+                await workContext.SetCurrentCustomerAsync(admin);
+                ClearWorkContextCaches();
                 var cartService = _services.GetRequiredService<IShoppingCartService>();
                 await cartService.ClearShoppingCartAsync(admin, store.Id);
                 var free = new Product
@@ -2418,6 +2463,8 @@ public sealed class WebCoverageHarness
 
             await Try(async () =>
             {
+                await workContext.SetCurrentCustomerAsync(admin);
+                ClearWorkContextCaches();
                 await EnsurePlainProductInCartAsync();
                 TestPaymentMethod.TestSkipPaymentInfo = true;
                 var checkout = CreateController<global::Nop.Web.Controllers.CheckoutController>();
@@ -2740,41 +2787,108 @@ public sealed class WebCoverageHarness
 
     public async Task ExerciseValidatorsAsync(IEnumerable<Type> types)
     {
-        foreach (var type in types)
+        var typeList = types.ToList();
+        var settingService = _services.GetRequiredService<ISettingService>();
+        var customerSettings = _services.GetRequiredService<CustomerSettings>();
+        var addressSettings = _services.GetRequiredService<AddressSettings>();
+        var taxSettings = _services.GetRequiredService<TaxSettings>();
+
+        Dictionary<string, object> Snapshot(object settings)
         {
-            object validator;
-            try
-            {
-                validator = ActivatorUtilities.CreateInstance(_services, type);
-                TypesCreated++;
-            }
-            catch (Exception ex)
-            {
-                TypesFailed++;
-                Failures.Add($"{type.FullName}: create {ex.GetBaseException().Message}");
-                continue;
-            }
+            var values = new Dictionary<string, object>();
+            foreach (var prop in settings.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                         .Where(p => p.CanRead && p.CanWrite && p.GetIndexParameters().Length == 0))
+                values[prop.Name] = prop.GetValue(settings);
+            return values;
+        }
 
-            var modelType = type.BaseType?.GetGenericArguments().FirstOrDefault();
-            if (modelType == null)
-                continue;
-
-            try
+        void Restore(object settings, Dictionary<string, object> values)
+        {
+            foreach (var prop in settings.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                         .Where(p => p.CanWrite && p.GetIndexParameters().Length == 0))
             {
-                var model = CreateArg(modelType, "model", type);
-                var validate = validator.GetType().GetMethods()
-                    .FirstOrDefault(m => m.Name == "Validate" && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == modelType);
-                validate?.Invoke(validator, [model]);
-                MethodsInvoked++;
+                if (values.TryGetValue(prop.Name, out var value))
+                    prop.SetValue(settings, value);
             }
-            catch (Exception ex)
-            {
-                MethodsFailed++;
-                if (Failures.Count < 80)
-                    Failures.Add($"{type.Name}.Validate: {ex.GetBaseException().Message}");
-            }
+        }
 
-            await Task.CompletedTask;
+        void ApplyFlags(object settings, bool enabled, bool required)
+        {
+            foreach (var prop in settings.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                         .Where(p => p.CanWrite && p.GetIndexParameters().Length == 0))
+            {
+                if (prop.PropertyType == typeof(bool) && prop.Name.EndsWith("Enabled", StringComparison.Ordinal))
+                    prop.SetValue(settings, enabled);
+                if (prop.PropertyType == typeof(bool) && prop.Name.EndsWith("Required", StringComparison.Ordinal))
+                    prop.SetValue(settings, required);
+            }
+        }
+
+        async Task PersistAsync()
+        {
+            await settingService.SaveSettingAsync(customerSettings);
+            await settingService.SaveSettingAsync(addressSettings);
+            await settingService.SaveSettingAsync(taxSettings);
+        }
+
+        async Task ConstructAllAsync()
+        {
+            foreach (var type in typeList)
+            {
+                try
+                {
+                    var validator = ActivatorUtilities.CreateInstance(_services, type);
+                    TypesCreated++;
+                    var modelType = type.BaseType?.GetGenericArguments().FirstOrDefault();
+                    if (modelType == null)
+                        continue;
+                    var model = CreateArg(modelType, "model", type);
+                    var validate = validator.GetType().GetMethods()
+                        .FirstOrDefault(m => m.Name == "Validate" && m.GetParameters().Length == 1
+                                             && m.GetParameters()[0].ParameterType == modelType);
+                    validate?.Invoke(validator, [model]);
+                    MethodsInvoked++;
+                }
+                catch (Exception ex)
+                {
+                    TypesFailed++;
+                    if (Failures.Count < 80)
+                        Failures.Add($"{type.Name}: {ex.GetBaseException().Message}");
+                }
+            }
+        }
+
+        var snapCustomer = Snapshot(customerSettings);
+        var snapAddress = Snapshot(addressSettings);
+        var snapTax = Snapshot(taxSettings);
+        try
+        {
+            ApplyFlags(customerSettings, true, true);
+            ApplyFlags(addressSettings, true, true);
+            ApplyFlags(taxSettings, true, true);
+            customerSettings.EnteringEmailTwice = true;
+            customerSettings.UsernamesEnabled = true;
+            customerSettings.DateOfBirthMinimumAge = 18;
+            taxSettings.EuVatEnabled = true;
+            taxSettings.EuVatRequired = true;
+            await PersistAsync();
+            await ConstructAllAsync();
+
+            ApplyFlags(customerSettings, true, false);
+            ApplyFlags(addressSettings, true, false);
+            ApplyFlags(taxSettings, true, false);
+            customerSettings.EnteringEmailTwice = false;
+            customerSettings.DateOfBirthMinimumAge = null;
+            taxSettings.EuVatRequired = false;
+            await PersistAsync();
+            await ConstructAllAsync();
+        }
+        finally
+        {
+            Restore(customerSettings, snapCustomer);
+            Restore(addressSettings, snapAddress);
+            Restore(taxSettings, snapTax);
+            await PersistAsync();
         }
     }
 
