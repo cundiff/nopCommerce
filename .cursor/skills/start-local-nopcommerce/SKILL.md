@@ -9,7 +9,7 @@ description: Build and run this nopCommerce app locally in Docker, then open it 
 
 Bring up this nopCommerce repo locally and open the app in the Cursor browser.
 
-This repo targets .NET 10. Prefer Docker because the host may not have the .NET SDK installed. On Apple Silicon, build and run as `linux/amd64`; the published app includes `IBM.Data.Db2.dll`, which is not compatible with an ARM64 process.
+This repo targets .NET 11 Preview. Prefer Docker because the host may not have the .NET SDK installed. On Apple Silicon, build and run as `linux/amd64`; the published app includes `IBM.Data.Db2.dll`, which is not compatible with an ARM64 process.
 
 ## Workflow
 
