@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Retarget and check nopCommerce .NET 11 Preview 7 pins.
 
-Does not touch Autofac, Npgsql, or Microsoft.Data.SqlClient.
+Leaves Autofac and Npgsql on their own majors. Pins SqlClient to 7.0.2.
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ TFM = "net11.0"
 SDK = "11.0.100-preview.7.26381.103"
 PKG = "11.0.0-preview.7.26381.103"
 RUNTIME = "11.0.0-preview.7.26381.103"
-DOCKER_SDK = "mcr.microsoft.com/dotnet/sdk:11.0-preview-alpine"
-DOCKER_ASPNET = "mcr.microsoft.com/dotnet/aspnet:11.0-preview-alpine"
+DOCKER_SDK = "mcr.microsoft.com/dotnet/sdk:11.0.100-preview.7-alpine3.24"
+DOCKER_ASPNET = "mcr.microsoft.com/dotnet/aspnet:11.0.0-preview.7-alpine3.24"
 
 SHARED_FRAMEWORK_PACKAGES = (
     "Microsoft.AspNetCore.Mvc.NewtonsoftJson",
@@ -79,7 +79,7 @@ def inventory() -> dict[str, list[str]]:
         data = path.read_text(encoding="utf-8", errors="replace")
         if "<TargetFramework>net10.0</TargetFramework>" in data or '"tfm": "net10.0"' in data:
             hits["tfm_net10"].append(rel(path))
-        if "sdk:10.0" in data or "aspnet:10.0" in data:
+        if "sdk:10.0" in data or "aspnet:10.0" in data or "11.0-preview-alpine" in data:
             hits["docker_10"].append(rel(path))
         if '"version": "10.0.100"' in data or "dotnet-version: 10.0" in data:
             hits["sdk_10"].append(rel(path))
@@ -114,6 +114,10 @@ def apply() -> list[str]:
             continue
         data = path.read_bytes()
         new = data.replace(b"<TargetFramework>net10.0</TargetFramework>", f"<TargetFramework>{TFM}</TargetFramework>".encode())
+        new = new.replace(
+            f"<TargetFramework>{TFM}</TargetFramework> ".encode(),
+            f"<TargetFramework>{TFM}</TargetFramework>".encode(),
+        )
         if path.suffix.lower() == ".csproj":
             for name in SHARED_FRAMEWORK_PACKAGES:
                 new = replace_package_version(new, name, PKG)
@@ -137,17 +141,20 @@ def apply() -> list[str]:
 
     dockerfile = ROOT / "Dockerfile"
     data = dockerfile.read_bytes()
-    new = data.replace(b"mcr.microsoft.com/dotnet/sdk:10.0-alpine", DOCKER_SDK.encode()).replace(
-        b"mcr.microsoft.com/dotnet/aspnet:10.0-alpine", DOCKER_ASPNET.encode()
+    new = (
+        data.replace(b"mcr.microsoft.com/dotnet/sdk:10.0-alpine", DOCKER_SDK.encode())
+        .replace(b"mcr.microsoft.com/dotnet/aspnet:10.0-alpine", DOCKER_ASPNET.encode())
+        .replace(b"mcr.microsoft.com/dotnet/sdk:11.0-preview-alpine", DOCKER_SDK.encode())
+        .replace(b"mcr.microsoft.com/dotnet/aspnet:11.0-preview-alpine", DOCKER_ASPNET.encode())
+        .replace(b" AS runtime \n", b" AS runtime\n")
+        .replace(b" AS runtime \r\n", b" AS runtime\r\n")
     )
     write_if_changed(dockerfile, new, data, changed)
 
     workflow = ROOT / ".github" / "workflows" / "dotnet.yml"
     data = workflow.read_bytes()
-    new = data.replace(
-        b"        dotnet-version: 10.0.x\n",
-        f"        dotnet-version: {SDK}\n        include-prerelease: true\n".encode(),
-    )
+    new = data.replace(b"        dotnet-version: 10.0.x\n", f"        dotnet-version: {SDK}\n".encode())
+    new = new.replace(b"        include-prerelease: true\n", b"")
     write_if_changed(workflow, new, data, changed)
 
     skill = ROOT / ".cursor" / "skills" / "start-local-nopcommerce" / "SKILL.md"
@@ -183,11 +190,13 @@ def check() -> list[str]:
 
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     if DOCKER_SDK not in dockerfile or DOCKER_ASPNET not in dockerfile:
-        errors.append("Dockerfile missing 11.0-preview-alpine tags")
+        errors.append("Dockerfile missing Preview 7 Alpine tags")
 
     workflow = (ROOT / ".github" / "workflows" / "dotnet.yml").read_text(encoding="utf-8")
     if SDK not in workflow:
         errors.append("CI missing Preview 7 SDK pin")
+    if "include-prerelease" in workflow:
+        errors.append("CI still has include-prerelease, which setup-dotnet v4 ignores")
 
     for path in ROOT.rglob("*.csproj"):
         if any(part in {".git", "bin", "obj"} for part in path.parts):

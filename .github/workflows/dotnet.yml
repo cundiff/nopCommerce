@@ -20,7 +20,6 @@ jobs:
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 11.0.100-preview.7.26381.103
-        include-prerelease: true
     - name: Restore dependencies
       run: dotnet restore src
     - name: Build
