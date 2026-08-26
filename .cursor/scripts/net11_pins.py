@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Retarget and check nopCommerce .NET 11 Preview 7 pins.
-
-Does not touch Autofac, Npgsql, or Microsoft.Data.SqlClient.
-"""
-
 from __future__ import annotations
 
 import argparse

@@ -1,4 +1,3 @@
-# create the build instance 
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:11.0-preview-alpine AS build
 
 ARG TARGETPLATFORM
@@ -32,7 +31,6 @@ RUN chmod 775 App_Data \
               wwwroot/images/uploaded \
 	      wwwroot/sitemaps
 
-# create the runtime instance 
 FROM mcr.microsoft.com/dotnet/aspnet:11.0-preview-alpine AS runtime 
 
 # add globalization support
