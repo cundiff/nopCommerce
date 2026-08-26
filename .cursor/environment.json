@@ -1,0 +1,17 @@
+{
+  "name": "nopCommerce (.NET 10 + PostgreSQL)",
+  "user": "ubuntu",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh",
+  "terminals": [
+    {
+      "name": "nop-web",
+      "command": "bash .cursor/run-web.sh"
+    }
+  ],
+  "ports": [8080]
+}
