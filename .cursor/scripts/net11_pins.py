@@ -33,7 +33,10 @@ SHARED_FRAMEWORK_PACKAGES = (
 LEAVE_ALONE = {
     "Autofac.Extensions.DependencyInjection": "10.0.0",
     "Npgsql": "10.0.2",
-    "Microsoft.Data.SqlClient": "6.1.1",
+}
+
+PINNED_PACKAGES = {
+    "Microsoft.Data.SqlClient": "7.0.2",
 }
 
 
@@ -114,6 +117,8 @@ def apply() -> list[str]:
         if path.suffix.lower() == ".csproj":
             for name in SHARED_FRAMEWORK_PACKAGES:
                 new = replace_package_version(new, name, PKG)
+            for name, version in PINNED_PACKAGES.items():
+                new = replace_package_version(new, name, version)
         write_if_changed(path, new, data, changed)
 
     runtime = ROOT / "src" / "Build" / "ClearPluginAssemblies.runtimeconfig.json"
@@ -191,6 +196,9 @@ def check() -> list[str]:
         for name, version in LEAVE_ALONE.items():
             if f'Include="{name}"' in data and f'Version="{version}"' not in data:
                 errors.append(f"{rel(path)} changed {name}")
+        for name, version in PINNED_PACKAGES.items():
+            if f'Include="{name}"' in data and f'Version="{version}"' not in data:
+                errors.append(f"{rel(path)} {name} is not {version}")
 
     skill = (ROOT / ".cursor" / "skills" / "start-local-nopcommerce" / "SKILL.md").read_text(
         encoding="utf-8"
