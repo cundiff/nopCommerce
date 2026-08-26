@@ -15,10 +15,11 @@
     <PackageReference Include="FluentMigrator" Version="7.2.0" />
     <PackageReference Include="FluentMigrator.Runner" Version="7.2.0" />
     <PackageReference Include="linq2db" Version="6.2.1" />
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.1" />
+    <!-- 7.0.0 broke SqlBulkCopy on SQL Server 2016; 7.0.1+ fixed it. Caching.SqlServer 11 requires SqlClient 7+. -->
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
     <PackageReference Include="Npgsql" Version="10.0.2" />
     <PackageReference Include="MySqlConnector" Version="2.5.0" />
-    <PackageReference Include="System.Configuration.ConfigurationManager" Version="10.0.1" />
+    <PackageReference Include="System.Configuration.ConfigurationManager" Version="11.0.0-preview.7.26381.103" />
   </ItemGroup>
 
   <ItemGroup>

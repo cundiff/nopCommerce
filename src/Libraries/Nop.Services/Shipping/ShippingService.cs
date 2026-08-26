@@ -329,8 +329,8 @@ public partial class ShippingService : IShippingService
                 totalVolume += productVolume * packageItem.GetQuantity();
             }
 
-            //set dimensions as cube root of volume
-            width = length = height = Convert.ToDecimal(Math.Pow(Convert.ToDouble(totalVolume), 1.0 / 3.0));
+            // Math.Pow(volume, 1/3) is not a true cube root; .NET 11 returns 3.999... for perfect cubes such as 64.
+            width = length = height = Convert.ToDecimal(Math.Cbrt(Convert.ToDouble(totalVolume)));
 
             //sometimes we have products with sizes like 1x1x20
             //that's why let's ensure that a maximum dimension is always preserved
