@@ -30,12 +30,12 @@ SHARED_FRAMEWORK_PACKAGES = (
     "System.Configuration.ConfigurationManager",
 )
 
-LEAVE_ALONE = {
+THIRD_PARTY_MAJORS = {
     "Autofac.Extensions.DependencyInjection": "10.0.0",
     "Npgsql": "10.0.2",
 }
 
-PINNED_PACKAGES = {
+SQLCLIENT_SQL2016_BULKCOPY_PIN = {
     "Microsoft.Data.SqlClient": "7.0.2",
 }
 
@@ -121,7 +121,7 @@ def apply() -> list[str]:
         if path.suffix.lower() == ".csproj":
             for name in SHARED_FRAMEWORK_PACKAGES:
                 new = replace_package_version(new, name, PKG)
-            for name, version in PINNED_PACKAGES.items():
+            for name, version in SQLCLIENT_SQL2016_BULKCOPY_PIN.items():
                 new = replace_package_version(new, name, version)
         write_if_changed(path, new, data, changed)
 
@@ -202,10 +202,10 @@ def check() -> list[str]:
         if any(part in {".git", "bin", "obj"} for part in path.parts):
             continue
         data = path.read_text(encoding="utf-8")
-        for name, version in LEAVE_ALONE.items():
+        for name, version in THIRD_PARTY_MAJORS.items():
             if f'Include="{name}"' in data and f'Version="{version}"' not in data:
                 errors.append(f"{rel(path)} changed {name}")
-        for name, version in PINNED_PACKAGES.items():
+        for name, version in SQLCLIENT_SQL2016_BULKCOPY_PIN.items():
             if f'Include="{name}"' in data and f'Version="{version}"' not in data:
                 errors.append(f"{rel(path)} {name} is not {version}")
 
