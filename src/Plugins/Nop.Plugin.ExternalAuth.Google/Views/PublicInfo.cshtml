@@ -1,0 +1,9 @@
+@{
+    Layout = ""; 
+}
+<link rel="stylesheet" href="~/Plugins/ExternalAuth.Google/Content/googlestyles.css" />
+<div class="google-login-block">
+    <div class="buttons">
+        <a asp-controller="googleauthentication" asp-action="login" asp-route-returnurl="@Context.Request.Query["ReturnUrl"]" class="google-btn">Sign in with Google</a>
+    </div>
+</div>
