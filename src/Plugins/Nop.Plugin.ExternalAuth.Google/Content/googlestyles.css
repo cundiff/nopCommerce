@@ -1,0 +1,21 @@
+.google-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 180px;
+  height: 36px;
+  padding: 0 16px;
+  border: 1px solid #dadce0;
+  border-radius: 4px;
+  background-color: #fff;
+  color: #3c4043;
+  font-family: Arial, sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.google-btn:hover {
+  background-color: #f7f8f8;
+  color: #3c4043;
+}
